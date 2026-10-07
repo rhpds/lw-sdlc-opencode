@@ -121,7 +121,7 @@ This system automates ingestion, security analysis, codebase remediation, and ep
 | **Event wiring** | **EDA + platform config** | **Nexus** + GitLab webhooks → existing EDA; rulebook content from this git repo |
 | **Event chain** | **Ansible EDA** | Rulebooks on `:5000`, `query-tpa.yml`, `trigger-impact-analyzer.yml`, `trigger-mr-verifier.yml`, `tpa_results` callbacks |
 | **Application image** | **GitHub Actions → Quay** | Container build; GitOps updates image tag/digest in Git |
-| **Ephemeral test resources** | **OpenCode agent (`oc`)** | `pr-test-mr-*` namespaces, verify Jobs (exception to GitOps steady state) |
+| **Ephemeral test resources** | **OpenCode agent (`oc`)** | `pr-test-mr-<guid>-*` namespaces, verify Jobs (exception to GitOps steady state) |
 
 EDA is **deployed** by GitOps; EDA **runs** Ansible logic from git when webhooks arrive. Reference demos that use `ansible-playbook deploy.yml` for the whole stack (e.g. Lightwell `demo-setup.sh`) are **not** the pattern for this project’s infrastructure—only borrow their **TPA query / `tpa_results`** playbook ideas for EDA actions.
 
@@ -132,7 +132,7 @@ EDA is **deployed** by GitOps; EDA **runs** Ansible logic from git when webhooks
 * **Red Hat TPA:** On OpenShift; OIDC for automation (`TPA__OIDC__WALKER_CLIENT_SECRET` or equivalent token flow in Ansible).
 * **GitLab:** Self-hosted; authenticate with **`GITLAB_USERNAME`** and **`GITLAB_PASSWORD`** (service account). A GitLab PAT is **not** provisioned manually—when GitLab MCP or the API requires a token, it is **derived at runtime** from those credentials (§6.0).
 * **GitLab MCP:** Cluster service in namespace `sdlc-mcp-servers`, or stdio GitLab MCP in the OpenCode image.
-* **OpenShift:** Optional `RuntimeClass` `kata` (or gVisor) for verify Jobs; namespace `sdlc-sandboxes` for isolated builds.
+* **OpenShift:** Optional `RuntimeClass` `kata` (or gVisor) for verify Jobs; namespace `sdlc-sandboxes-<guid>` for isolated builds.
 * **Argo CD:** GitOps controller on the cluster; Applications watch this repo (or a deployment repo) for `gitops/` and `openshift/` paths. Cluster bootstrap may require a one-time Argo install; thereafter **all infrastructure** changes flow through Git merge + sync—not Ansible deploy playbooks.
 * **Event-Driven Ansible (EDA):** Deployed and configured via **GitOps** (operator, activation, rulebook mount from git). At runtime, EDA executes **only** event playbooks (`playbooks/`)—never used to install OpenCode, MCP, or namespaces.
 * **Sonatype Nexus:** Repository webhooks pointing at EDA are **GitOps-managed** (§3.1); baseline API behavior is documented from the prior Ansible implementation in [`docs/reference/nexus-webhook-ansible-baseline.md`](docs/reference/nexus-webhook-ansible-baseline.md).
@@ -292,7 +292,7 @@ Ansible MAY reject the webhook if this block is missing when `strict_handoff: tr
 
 * **mode:** `primary`
 * **Permissions:** allow `skill`, `shell` limited to `oc`/`kubectl` with verifier ServiceAccount; deny in-repo `edit` on control-plane workspace.
-* **ServiceAccount:** `mr-verifier` with RBAC to create namespaces matching `pr-test-mr-*`, Jobs in `sdlc-sandboxes`, and Routes in those namespaces.
+* **ServiceAccount:** `mr-verifier` with RBAC to create namespaces matching `pr-test-mr-<guid>-*`, Jobs in `sdlc-sandboxes-<guid>`, and Routes in those namespaces.
 
 ### 5.2 Skill: mr-verify-ephemeral
 
@@ -302,7 +302,7 @@ Workflow steps:
 
 1. **Parse handoff** — Extract `agent-handoff` JSON from MR description (GitLab MCP).
 2. **Compile and unit test** — Apply `openshift/templates/verify-job.yaml` with `runtimeClassName: kata` when available; image includes JDK + Maven; clone `source_branch`; run `mvn clean verify`. Poll Job logs; fail closed on non-zero exit.
-3. **Deploy ephemeral app** — Create namespace `pr-test-mr-<merge_request_iid>`; apply Deployment and Route from `openshift/templates/ephemeral-namespace.yaml` (or equivalent Helm/Kustomize path documented in the skill).
+3. **Deploy ephemeral app** — Create namespace `pr-test-mr-<guid>-<merge_request_iid>`; apply Deployment and Route from `openshift/templates/ephemeral-namespace.yaml` (or equivalent Helm/Kustomize path documented in the skill).
 4. **Smoke tests** — Run Playwright or Postman collection against the Route URL (Job or short-lived Pod in the ephemeral namespace).
 5. **Summarize** — GitLab MCP `create_merge_request_note` with build status, test summary, Route URL, and namespace TTL.
 
@@ -317,7 +317,7 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   generateName: verify-mr-
-  namespace: sdlc-sandboxes
+  namespace: sdlc-sandboxes-<guid>
 spec:
   ttlSecondsAfterFinished: 3600
   template:
@@ -340,7 +340,7 @@ The skill instructs the agent to substitute env values and `oc apply -f`.
 
 ### 5.4 Ephemeral deploy (illustrative)
 
-Namespace: `pr-test-mr-<merge_request_iid>`. Deployment name: `ephemeral-app`. Image: project pipeline output or prebuilt smoke image documented per demo app. Route: `ephemeral-app-pr-test-mr-<iid>.apps.<cluster>`.
+Namespace: `pr-test-mr-<guid>-<merge_request_iid>`. Deployment name: `ephemeral-app`. Image: project pipeline output or prebuilt smoke image documented per demo app. Route: `ephemeral-app-pr-test-mr-<guid>-<iid>.apps.<cluster>`.
 
 Implement via `oc apply` and templates in-repo; do not embed Fabric8 or Java clients.
 
@@ -417,7 +417,7 @@ Environment variables (`GITLAB_URL`, `GITLAB_USERNAME`, `GITLAB_PASSWORD`, deriv
 ### 6.3 Session lifecycle
 
 * **Async prompts:** `POST /session/{id}/prompt_async` returns `204`; monitor via `GET /event` (SSE) or session message APIs.
-* **Idempotency:** EDA SHOULD pass `merge_request_iid` in the verifier prompt so repeated webhooks do not duplicate namespaces (skill: check existing `pr-test-mr-*`).
+* **Idempotency:** EDA SHOULD pass `merge_request_iid` in the verifier prompt so repeated webhooks do not duplicate namespaces (skill: check existing `pr-test-mr-<guid>-*`).
 
 ---
 

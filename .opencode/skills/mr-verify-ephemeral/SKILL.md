@@ -49,12 +49,12 @@ Prefer handoff JSON over webhook fields when both exist; they must agree on `mer
 
 Demo depth **A** (`lw-demo-help-app`): use **`mvn clean verify`** unless handoff specifies otherwise.
 
-1. **Idempotency:** `oc get job -n sdlc-sandboxes -l mr-iid=<merge_request_iid>` — if a running/succeeded Job exists, reuse logs or skip recreate per operator policy. If a **failed** Job exists for this MR, delete it first (`oc delete job -n sdlc-sandboxes -l mr-iid=<merge_request_iid>`); a Job spec is immutable, so re-applying over a failed one silently keeps the old spec.
+1. **Idempotency:** `oc get job -n "$SDLC_SANDBOX_NAMESPACE" -l mr-iid=<merge_request_iid>` — if a running/succeeded Job exists, reuse logs or skip recreate per operator policy. If a **failed** Job exists for this MR, delete it first (`oc delete job -n "$SDLC_SANDBOX_NAMESPACE" -l mr-iid=<merge_request_iid>`); a Job spec is immutable, so re-applying over a failed one silently keeps the old spec.
 
-2. **Provision git credentials in `sdlc-sandboxes`.** The clone target is a private GitLab project and this namespace does **not** inherit the control-plane PAT, so a Job without credentials dies on `fatal: could not read Username`. Create the secret idempotently before applying the Job:
+2. **Provision git credentials in `$SDLC_SANDBOX_NAMESPACE`.** The clone target is a private GitLab project and this namespace does **not** inherit the control-plane PAT, so a Job without credentials dies on `fatal: could not read Username`. Create the secret idempotently before applying the Job:
 
    ```bash
-   oc create secret generic gitlab-pat -n sdlc-sandboxes \
+   oc create secret generic gitlab-pat -n "$SDLC_SANDBOX_NAMESPACE" \
      --from-literal=token="$GITLAB_PAT" \
      --dry-run=client -o yaml | oc apply -f -
    ```
@@ -64,9 +64,12 @@ Demo depth **A** (`lw-demo-help-app`): use **`mvn clean verify`** unless handoff
    Discover the tenant's Nexus, then publish the settings as a ConfigMap:
 
    ```bash
-   TENANT_NS=$(oc get cm tenant-integration -A -o jsonpath='{.items[0].metadata.namespace}')
-   NEXUS_NS=$(oc get cm tenant-integration -n "$TENANT_NS" -o jsonpath='{.data.NEXUS_NAMESPACE}')
-   NEXUS_REPOS=$(oc get cm tenant-integration -n "$TENANT_NS" -o jsonpath='{.data.NEXUS_WEBHOOK_REPOSITORIES}')
+   # These are injected into the OpenCode pod by the bootstrap-tenant chart.
+   # Do NOT rediscover them with `oc get cm tenant-integration -A`: there are
+   # two such ConfigMaps per tenant, and items[0] can resolve a DIFFERENT
+   # tenant on a shared cluster.
+   NEXUS_NS="$NEXUS_NAMESPACE"
+   NEXUS_REPOS="$NEXUS_REPOSITORIES"
    NEXUS_BASE="http://nexus.${NEXUS_NS}.svc.cluster.local:8081/repository"
    ```
 
@@ -75,7 +78,7 @@ Demo depth **A** (`lw-demo-help-app`): use **`mvn clean verify`** unless handoff
    Write `/tmp/opencode/settings.xml` with one `<repository>` per entry in `NEXUS_REPOS` (comma-separated; the `remediated` one carries the fix), then:
 
    ```bash
-   oc create configmap maven-settings -n sdlc-sandboxes \
+   oc create configmap maven-settings -n "$SDLC_SANDBOX_NAMESPACE" \
      --from-file=settings.xml=/tmp/opencode/settings.xml \
      --dry-run=client -o yaml | oc apply -f -
    ```
@@ -125,7 +128,7 @@ Demo depth **A** (`lw-demo-help-app`): use **`mvn clean verify`** unless handoff
    kind: Job
    metadata:
      name: verify-mr-<merge_request_iid>
-     namespace: sdlc-sandboxes
+     namespace: ${SDLC_SANDBOX_NAMESPACE}
      labels:
        mr-iid: "<merge_request_iid>"
    spec:
@@ -189,25 +192,25 @@ Demo depth **A** (`lw-demo-help-app`): use **`mvn clean verify`** unless handoff
 
    ```bash
    for _ in $(seq 1 90); do
-     s="$(oc get job verify-mr-<merge_request_iid> -n sdlc-sandboxes -o jsonpath='{.status.conditions[?(@.type=="Complete")].status} {.status.conditions[?(@.type=="Failed")].status}')"
+     s="$(oc get job verify-mr-<merge_request_iid> -n "$SDLC_SANDBOX_NAMESPACE" -o jsonpath='{.status.conditions[?(@.type=="Complete")].status} {.status.conditions[?(@.type=="Failed")].status}')"
      case "$s" in "True"*) echo COMPLETE; break ;; *"True") echo FAILED; break ;; esac
      sleep 10
    done
-   oc logs job/verify-mr-<merge_request_iid> -n sdlc-sandboxes --all-containers --tail=200
+   oc logs job/verify-mr-<merge_request_iid> -n "$SDLC_SANDBOX_NAMESPACE" --all-containers --tail=200
    ```
 
 6. Non-zero exit → post MR note with log excerpt via `mr-note`; **stop** (no ephemeral deploy).
 
 ## Step 3 — Ephemeral deploy
 
-Namespace: `pr-test-mr-<merge_request_iid>`.
+Namespace: `${EPHEMERAL_NS_PREFIX}-<merge_request_iid>`.
 
 1. **Idempotency:** if the namespace exists, inspect the existing BuildConfig/Deployment/Route before creating duplicates. A BuildConfig can be re-run with `oc start-build`; it does not need recreating.
-2. `oc create namespace pr-test-mr-<merge_request_iid>`.
-3. **Provision git credentials again — as a `basic-auth` secret this time.** The ephemeral namespace is separate from `sdlc-sandboxes`, so it does not have the step 2 secret, and an OpenShift build will **not** accept the Opaque `gitlab-pat`: `source.sourceSecret` requires type `kubernetes.io/basic-auth`. Without it the build pod dies in its init container with `could not read Username`, exactly as the verify Job does in step 2.
+2. `oc create namespace ${EPHEMERAL_NS_PREFIX}-<merge_request_iid>`.
+3. **Provision git credentials again — as a `basic-auth` secret this time.** The ephemeral namespace is separate from `$SDLC_SANDBOX_NAMESPACE`, so it does not have the step 2 secret, and an OpenShift build will **not** accept the Opaque `gitlab-pat`: `source.sourceSecret` requires type `kubernetes.io/basic-auth`. Without it the build pod dies in its init container with `could not read Username`, exactly as the verify Job does in step 2.
 
    ```bash
-   oc create secret generic gitlab-basic -n pr-test-mr-<merge_request_iid> \
+   oc create secret generic gitlab-basic -n ${EPHEMERAL_NS_PREFIX}-<merge_request_iid> \
      --type=kubernetes.io/basic-auth \
      --from-literal=username=oauth2 --from-literal=password="$GITLAB_PAT" \
      --dry-run=client -o yaml | oc apply -f -
@@ -241,7 +244,7 @@ Namespace: `pr-test-mr-<merge_request_iid>`.
      --dockerfile="$(cat /tmp/opencode/Dockerfile.mr-<merge_request_iid>)" \
      "<repository_git_url>#<source_branch>" \
      --to=help-im-vulnerable:mr-<merge_request_iid> \
-     -n pr-test-mr-<merge_request_iid>
+     -n ${EPHEMERAL_NS_PREFIX}-<merge_request_iid>
    ```
 
    Confirm both `.spec.source.sourceSecret.name` and `.spec.source.dockerfile` are set before starting the build; `oc new-build` silently omits the secret if it does not yet exist. A started build reports its source as `Dockerfile,Git@<sha>` when the inline Dockerfile took effect — plain `Git@<sha>` means it did not, and the build will fail.
@@ -249,8 +252,8 @@ Namespace: `pr-test-mr-<merge_request_iid>`.
 5. Deploy the built image from the internal registry and expose it. The container listens on **8080** and `oc new-app` names that port `8080-tcp`, so `--port=http` does not match any port on the Service and route creation fails:
 
    ```bash
-   oc new-app --image-stream=help-im-vulnerable:mr-<merge_request_iid> -n pr-test-mr-<merge_request_iid>
-   oc create route edge --service=help-im-vulnerable --port=8080 -n pr-test-mr-<merge_request_iid>
+   oc new-app --image-stream=help-im-vulnerable:mr-<merge_request_iid> -n ${EPHEMERAL_NS_PREFIX}-<merge_request_iid>
+   oc create route edge --service=help-im-vulnerable --port=8080 -n ${EPHEMERAL_NS_PREFIX}-<merge_request_iid>
    ```
 
 6. Wait for `oc rollout status deploy/help-im-vulnerable` before smoke testing, and record the Route URL.
@@ -263,7 +266,7 @@ Run the checks from a pod inside the cluster, not from the OpenCode container �
 
 ```bash
 oc run smoke-mr-<merge_request_iid> --rm -i --restart=Never \
-  -n pr-test-mr-<merge_request_iid> \
+  -n ${EPHEMERAL_NS_PREFIX}-<merge_request_iid> \
   --image=registry.access.redhat.com/ubi9/toolbox:latest -- \
   /bin/sh -c "curl -ksS --fail --max-time 30 https://<route-host>/api/status"
 ```
