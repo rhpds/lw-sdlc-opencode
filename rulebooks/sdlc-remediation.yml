@@ -1,6 +1,13 @@
 ---
-# SDLC remediation — Event-Driven Ansible rulebook
-# AAP EDA: use run_job_template (run_playbook requires inventory; not wired in EDA worker mode).
+# SDLC remediation — Event-Driven Ansible rulebook (Automation Orchestrator path)
+#
+# EDA is the sensor/bridge only:
+#   Nexus *.rhlw-*  → JT "SDLC Start Orchestrator"  → AO owns the run
+#   GitLab MR       → JT "SDLC Resume Orchestrator" → AO continue / Wait alternate
+#
+# Worker playbooks (Query TPA, Impact Analyzer, MR Verifier) are launched as
+# AAP job-template nodes from the Automation Orchestrator canvas — not from
+# these rules. For the pre-AO chain, use sdlc-remediation-legacy.yml.
 
 - name: SDLC OpenCode remediation
   hosts: all
@@ -10,11 +17,8 @@
         port: 5000
 
   rules:
-    # The CREATED branch must match only Lightwell remediated artifacts, identified by
-    # the .rhlw-NNNNN version suffix. Nexus fires component CREATED whenever a proxy
-    # repo caches anything, so an unfiltered condition also matches ordinary transitive
-    # dependencies — and the MR verify build resolves through these same proxies, so it
-    # re-triggers this pipeline once per artifact it pulls.
+    # Only Lightwell remediated artifacts (.rhlw-NNNNN). Unfiltered CREATED also
+    # matches transitive deps pulled during MR verify and re-triggers the pipeline.
     - name: Nexus component created or vulnerability fix published
       condition: >
         (event.payload.action is defined and event.payload.action == "CREATED" and
@@ -23,16 +27,12 @@
         (event.payload.type is defined and event.payload.type == "vulnerability_fix_published")
       action:
         run_job_template:
-          name: "SDLC Query TPA"
+          name: "SDLC Start Orchestrator"
           organization: "{{ aap_organization_name }}"
           job_args:
             extra_vars:
-              # Only the Nexus branch of the condition supplies `component`; a
-              # vulnerability_fix_published event has no such key. Templates render under
-              # strict undefined, where `event.payload.component.name` raises before the
-              # `default` filter ever runs — so the whole action fails with "Undefined
-              # jinja variable 'component'" and no job launches. Coercing `component` to
-              # an empty dict first keeps the attribute lookup legal for both shapes.
+              # Coerce component to {} — vulnerability_fix_published has no component key
+              # and strict undefined would fail before default() runs.
               artifact_name: "{{ (event.payload.component | default({})).name | default(event.payload.artifact_name | default('')) }}"
               artifact_version: "{{ (event.payload.component | default({})).version | default(event.payload.artifact_version | default('')) }}"
               package_purl: "{{ event.payload.package | default((event.payload.component | default({})).name | default('')) }}"
@@ -50,24 +50,16 @@
               gitlab_url: "{{ gitlab_url }}"
               remediation_app_gitlab_path: "{{ remediation_app_gitlab_path }}"
               eda_webhook_url: "{{ eda_webhook_url }}"
-              blast_radius_mode: single_app_demo_a
-
-    - name: TPA query results callback
-      condition: >
-        event.payload.type is defined and
-        event.payload.type == "tpa_results" and
-        event.payload.affected_repos is defined
-      action:
-        run_job_template:
-          name: "SDLC Trigger Impact Analyzer"
-          organization: "{{ aap_organization_name }}"
-          job_args:
-            extra_vars:
-              affected_repos: "{{ event.payload.affected_repos }}"
-              package_info: "{{ event.payload.package_info }}"
               opencode_base_url: "{{ opencode_base_url }}"
               opencode_server_username: "{{ opencode_server_username | default('opencode') }}"
               opencode_server_password: "{{ opencode_server_password }}"
+              blast_radius_mode: single_app_demo_a
+              aap_organization_name: "{{ aap_organization_name }}"
+              ao_base_url: "{{ ao_base_url }}"
+              ao_client_id: "{{ ao_client_id }}"
+              ao_client_secret: "{{ ao_client_secret }}"
+              ao_start_webhook_path: "{{ ao_start_webhook_path }}"
+              guid: "{{ guid | default('') }}"
 
     - name: GitLab merge request opened for dependency branch
       condition: >
@@ -79,7 +71,7 @@
         event.payload.object_attributes.source_branch is match('update-artifact-.*')
       action:
         run_job_template:
-          name: "SDLC Trigger MR Verifier"
+          name: "SDLC Resume Orchestrator"
           organization: "{{ aap_organization_name }}"
           job_args:
             extra_vars:
@@ -91,6 +83,12 @@
               opencode_base_url: "{{ opencode_base_url }}"
               opencode_server_username: "{{ opencode_server_username | default('opencode') }}"
               opencode_server_password: "{{ opencode_server_password }}"
+              aap_organization_name: "{{ aap_organization_name }}"
+              ao_base_url: "{{ ao_base_url }}"
+              ao_client_id: "{{ ao_client_id }}"
+              ao_client_secret: "{{ ao_client_secret }}"
+              ao_resume_webhook_path: "{{ ao_resume_webhook_path }}"
+              guid: "{{ guid | default('') }}"
 
     - name: Log unmatched webhook events
       condition: true

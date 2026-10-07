@@ -1,0 +1,44 @@
+---
+# Bridge: Nexus/EDA event → Automation Orchestrator (overall flow controller).
+# EDA only filters *.rhlw-* / vulnerability_fix_published; AO owns Query TPA →
+# Impact Analyzer → Wait/Resume → MR Verifier.
+- name: Start Lightwell remediation in Automation Orchestrator
+  hosts: localhost
+  gather_facts: false
+
+  tasks:
+    - name: Resolve AO start webhook path
+      ansible.builtin.set_fact:
+        ao_webhook_path: "{{ ao_start_webhook_path | default(ao_webhook_path | default(''), true) }}"
+
+    - name: Build AO start payload from Nexus / synthetic event
+      ansible.builtin.set_fact:
+        event_payload:
+          type: lightwell_remediation_start
+          source: nexus_eda
+          guid: "{{ guid | default('') }}"
+          artifact_name: "{{ artifact_name | default('') }}"
+          artifact_version: "{{ artifact_version | default('') }}"
+          package_purl: "{{ package_purl | default(artifact_name | default('')) }}"
+          vulnerable_version: "{{ vulnerable_version | default('') }}"
+          fix_version: "{{ fix_version | default(artifact_version | default('')) }}"
+          cve_id: "{{ cve_id | default('unknown') }}"
+          severity: "{{ severity | default('medium') }}"
+          tpa_url: "{{ tpa_url | default('') }}"
+          keycloak_url: "{{ keycloak_url | default('') }}"
+          keycloak_tpa_realm: "{{ keycloak_tpa_realm | default('trusted-profile-analyzer') }}"
+          tpa_uploader_username: "{{ tpa_uploader_username | default('') }}"
+          tpa_oauth_client_id: "{{ tpa_oauth_client_id | default('trustify-ui') }}"
+          tpa_uploader_password: "{{ tpa_uploader_password | default('') }}"
+          tpa_sbom_label: "{{ tpa_sbom_label | default('') }}"
+          gitlab_url: "{{ gitlab_url | default('') }}"
+          remediation_app_gitlab_path: "{{ remediation_app_gitlab_path | default('') }}"
+          eda_webhook_url: "{{ eda_webhook_url | default('') }}"
+          opencode_base_url: "{{ opencode_base_url | default('') }}"
+          opencode_server_username: "{{ opencode_server_username | default('opencode') }}"
+          opencode_server_password: "{{ opencode_server_password | default('') }}"
+          blast_radius_mode: "{{ blast_radius_mode | default('single_app_demo_a') }}"
+          aap_organization_name: "{{ aap_organization_name | default('Default') }}"
+
+    - name: Trigger Automation Orchestrator start webhook
+      ansible.builtin.import_tasks: tasks/trigger-ao-webhook.yml

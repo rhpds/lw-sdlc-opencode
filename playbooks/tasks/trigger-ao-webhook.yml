@@ -1,0 +1,54 @@
+---
+# Shared tasks: OAuth client_credentials → POST payload to Automation Orchestrator
+# EDA trigger endpoint. Pattern from Red Hat AO docs (2026.8).
+#
+# Required vars:
+#   ao_base_url, ao_webhook_path, ao_client_id, ao_client_secret, event_payload
+# Optional:
+#   validate_certs (default false)
+
+- name: Require Automation Orchestrator webhook settings
+  ansible.builtin.assert:
+    that:
+      - ao_base_url | default('') | length > 0
+      - ao_webhook_path | default('') | length > 0
+      - ao_client_id | default('') | length > 0
+      - ao_client_secret | default('') | length > 0
+    fail_msg: >-
+      Automation Orchestrator bridge requires ao_base_url, ao_webhook_path,
+      ao_client_id, and ao_client_secret (set via EDA activation extra_vars
+      or AAP credential). Until AO is installed, use rulebook
+      sdlc-remediation-legacy.yml.
+
+- name: Obtain Automation Orchestrator OAuth token
+  ansible.builtin.uri:
+    url: "{{ ao_base_url | regex_replace('/$', '') }}/api/v1/auth/token"
+    method: POST
+    body_format: form-urlencoded
+    body:
+      grant_type: client_credentials
+      client_id: "{{ ao_client_id }}"
+      client_secret: "{{ ao_client_secret }}"
+    status_code: [200]
+    validate_certs: "{{ validate_certs | default(false) }}"
+  register: ao_token_response
+
+- name: Post event payload to Automation Orchestrator EDA trigger
+  ansible.builtin.uri:
+    url: "{{ ao_base_url | regex_replace('/$', '') }}/api/v1/webhooks/eda/{{ ao_webhook_path }}"
+    method: POST
+    body_format: json
+    headers:
+      Authorization: "Bearer {{ ao_token_response.json.access_token }}"
+      Content-Type: application/json
+    body: "{{ event_payload }}"
+    status_code: [200, 201, 202]
+    validate_certs: "{{ validate_certs | default(false) }}"
+  register: ao_webhook_response
+
+- name: Display Automation Orchestrator execution id
+  ansible.builtin.debug:
+    msg: >-
+      Automation Orchestrator workflow started
+      (execution_id={{ ao_webhook_response.json.execution_id | default('n/a') }},
+      status={{ ao_webhook_response.status }})

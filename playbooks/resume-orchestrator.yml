@@ -1,0 +1,31 @@
+---
+# Bridge: GitLab MR opened → Automation Orchestrator resume/continue webhook.
+# Preferred long-term: AO Wait/Approval inside the same run. This callback path
+# covers AO designs that use a second EDA trigger to continue after the MR lands.
+- name: Resume Lightwell remediation in Automation Orchestrator
+  hosts: localhost
+  gather_facts: false
+
+  tasks:
+    - name: Resolve AO resume webhook path
+      ansible.builtin.set_fact:
+        ao_webhook_path: "{{ ao_resume_webhook_path | default(ao_webhook_path | default(''), true) }}"
+
+    - name: Build AO resume payload from GitLab MR event
+      ansible.builtin.set_fact:
+        event_payload:
+          type: lightwell_remediation_resume
+          source: gitlab_mr_eda
+          guid: "{{ guid | default('') }}"
+          merge_request_iid: "{{ merge_request_iid | default('') }}"
+          project_id: "{{ project_id | default('') }}"
+          source_branch: "{{ source_branch | default('') }}"
+          target_branch: "{{ target_branch | default('main') }}"
+          repository_git_url: "{{ repository_git_url | default('') }}"
+          opencode_base_url: "{{ opencode_base_url | default('') }}"
+          opencode_server_username: "{{ opencode_server_username | default('opencode') }}"
+          opencode_server_password: "{{ opencode_server_password | default('') }}"
+          aap_organization_name: "{{ aap_organization_name | default('Default') }}"
+
+    - name: Trigger Automation Orchestrator resume webhook
+      ansible.builtin.import_tasks: tasks/trigger-ao-webhook.yml
