@@ -96,3 +96,23 @@
         status_code: [200, 201, 202, 204]
         validate_certs: "{{ validate_certs | default(false) }}"
       register: eda_callback
+      when: (eda_webhook_url | default('') | length) > 0
+
+    # Automation Orchestrator reads these via aap_job_template node artifacts.
+    - name: Export blast-radius artifacts for Automation Orchestrator
+      ansible.builtin.set_stats:
+        data:
+          package_info: "{{ package_info }}"
+          affected_repos: "{{ affected_repos }}"
+          blast_radius: "{{ blast_radius }}"
+          query: "{{ package_purl | default(resolved_artifact_id, true) }}"
+        per_host: false
+
+    # AO canvas gates Impact on Query TPA job success. Legacy EDA already received
+    # the tpa_results callback above when eda_webhook_url is set.
+    - name: Fail when blast radius is empty (AO does not launch Impact)
+      ansible.builtin.fail:
+        msg: >-
+          No blast radius for {{ resolved_artifact_id | default('unknown') }}
+          (SBOM label {{ tpa_sbom_label | default('') }}). Skipping remediation.
+      when: (blast_radius.count | default(0) | int) < 1
