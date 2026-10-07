@@ -1,5 +1,6 @@
 ---
-# LEGACY: EDA owns the chain (Query TPA → Impact → MR Verifier). Prefer sdlc-remediation.yml + Automation Orchestrator.
+# LEGACY: EDA owns the chain (Query TPA → Impact → MR Verifier). Prefer
+# sdlc-remediation.yml + Automation Orchestrator when AO is installed.
 # AAP EDA: use run_job_template (run_playbook requires inventory; not wired in EDA worker mode).
 
 - name: SDLC OpenCode remediation
@@ -10,11 +11,8 @@
         port: 5000
 
   rules:
-    # The CREATED branch must match only Lightwell remediated artifacts, identified by
-    # the .rhlw-NNNNN version suffix. Nexus fires component CREATED whenever a proxy
-    # repo caches anything, so an unfiltered condition also matches ordinary transitive
-    # dependencies — and the MR verify build resolves through these same proxies, so it
-    # re-triggers this pipeline once per artifact it pulls.
+    # Only Lightwell remediated artifacts (.rhlw-NNNNN). Unfiltered CREATED also
+    # matches transitive deps pulled during MR verify and re-triggers the pipeline.
     - name: Nexus component created or vulnerability fix published
       condition: >
         (event.payload.action is defined and event.payload.action == "CREATED" and
@@ -27,15 +25,12 @@
           organization: "{{ aap_organization_name }}"
           job_args:
             extra_vars:
-              # Only the Nexus branch of the condition supplies `component`; a
-              # vulnerability_fix_published event has no such key. Templates render under
-              # strict undefined, where `event.payload.component.name` raises before the
-              # `default` filter ever runs — so the whole action fails with "Undefined
-              # jinja variable 'component'" and no job launches. Coercing `component` to
-              # an empty dict first keeps the attribute lookup legal for both shapes.
+              # Coerce component to {} — vulnerability_fix_published has no component key
+              # and strict undefined would fail before default() runs.
               artifact_name: "{{ (event.payload.component | default({})).name | default(event.payload.artifact_name | default('')) }}"
+              artifact_group: "{{ (event.payload.component | default({})).group | default(event.payload.artifact_group | default('')) }}"
               artifact_version: "{{ (event.payload.component | default({})).version | default(event.payload.artifact_version | default('')) }}"
-              package_purl: "{{ event.payload.package | default((event.payload.component | default({})).name | default('')) }}"
+              package_purl: "{{ event.payload.package | default('') }}"
               vulnerable_version: "{{ event.payload.vulnerable_version | default('') }}"
               fix_version: "{{ event.payload.fix_version | default((event.payload.component | default({})).version | default('')) }}"
               cve_id: "{{ event.payload.cve_id | default('unknown') }}"
@@ -73,6 +68,8 @@
       condition: >
         event.payload.object_kind is defined and
         event.payload.object_kind == "merge_request" and
+        event.payload.object_attributes.action is defined and
+        event.payload.object_attributes.action == "open" and
         event.payload.object_attributes.state is defined and
         event.payload.object_attributes.state == "opened" and
         event.payload.object_attributes.source_branch is defined and

@@ -18,8 +18,10 @@
           source: nexus_eda
           guid: "{{ guid | default('') }}"
           artifact_name: "{{ artifact_name | default('') }}"
+          artifact_group: "{{ artifact_group | default('') }}"
           artifact_version: "{{ artifact_version | default('') }}"
-          package_purl: "{{ package_purl | default(artifact_name | default('')) }}"
+          # Prefer explicit purl; else group:name when group is present (Maven GAV).
+          package_purl: "{{ package_purl | default(((artifact_group ~ ':' ~ artifact_name) if (artifact_group | default('') | length > 0 and artifact_name | default('') | length > 0) else (artifact_name | default(''))), true) }}"
           vulnerable_version: "{{ vulnerable_version | default('') }}"
           fix_version: "{{ fix_version | default(artifact_version | default('')) }}"
           cve_id: "{{ cve_id | default('unknown') }}"
