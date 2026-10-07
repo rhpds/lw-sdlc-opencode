@@ -35,14 +35,14 @@
 
     - name: Derive artifact coordinates from Nexus or vulnerability event
       ansible.builtin.set_fact:
-        resolved_artifact_id: "{{ artifact_name | default(package_purl | default('')) }}"
+        resolved_artifact_id: "{{ (artifact_group ~ ':' ~ artifact_name) if (artifact_group | default('') | length > 0 and artifact_name | default('') | length > 0) else (package_purl | default(artifact_name | default(''), true)) }}"
         resolved_new_version: "{{ artifact_version | default(fix_version | default('')) }}"
         resolved_gitlab_path: "{{ remediation_gitlab_path }}"
 
     - name: Build package_info
       ansible.builtin.set_fact:
         package_info:
-          purl: "{{ package_purl | default(resolved_artifact_id) }}"
+          purl: "{{ package_purl | default(resolved_artifact_id, true) }}"
           artifact_id: "{{ resolved_artifact_id }}"
           vulnerable_version: "{{ vulnerable_version | default('') }}"
           fix_version: "{{ resolved_new_version }}"
@@ -77,7 +77,7 @@
       ansible.builtin.debug:
         msg:
           type: tpa_results
-          query: "{{ package_purl | default(resolved_artifact_id) }}"
+          query: "{{ package_purl | default(resolved_artifact_id, true) }}"
           affected_repos: "{{ affected_repos }}"
           package_info: "{{ package_info }}"
           blast_radius: "{{ blast_radius }}"
@@ -89,7 +89,7 @@
         body_format: json
         body:
           type: tpa_results
-          query: "{{ package_purl | default(resolved_artifact_id) }}"
+          query: "{{ package_purl | default(resolved_artifact_id, true) }}"
           affected_repos: "{{ affected_repos }}"
           package_info: "{{ package_info }}"
           blast_radius: "{{ blast_radius }}"

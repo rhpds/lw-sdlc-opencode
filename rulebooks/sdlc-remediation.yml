@@ -34,8 +34,9 @@
               # Coerce component to {} — vulnerability_fix_published has no component key
               # and strict undefined would fail before default() runs.
               artifact_name: "{{ (event.payload.component | default({})).name | default(event.payload.artifact_name | default('')) }}"
+              artifact_group: "{{ (event.payload.component | default({})).group | default(event.payload.artifact_group | default('')) }}"
               artifact_version: "{{ (event.payload.component | default({})).version | default(event.payload.artifact_version | default('')) }}"
-              package_purl: "{{ event.payload.package | default((event.payload.component | default({})).name | default('')) }}"
+              package_purl: "{{ event.payload.package | default('') }}"
               vulnerable_version: "{{ event.payload.vulnerable_version | default('') }}"
               fix_version: "{{ event.payload.fix_version | default((event.payload.component | default({})).version | default('')) }}"
               cve_id: "{{ event.payload.cve_id | default('unknown') }}"
@@ -65,6 +66,8 @@
       condition: >
         event.payload.object_kind is defined and
         event.payload.object_kind == "merge_request" and
+        event.payload.object_attributes.action is defined and
+        event.payload.object_attributes.action == "open" and
         event.payload.object_attributes.state is defined and
         event.payload.object_attributes.state == "opened" and
         event.payload.object_attributes.source_branch is defined and

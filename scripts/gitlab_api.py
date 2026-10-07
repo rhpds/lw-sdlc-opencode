@@ -173,6 +173,41 @@ def bump_maven_dependency(pom: str, artifact_id: str, new_version: str) -> tuple
     return new_pom, old
 
 
+DEMO_STATUS_PATH = "src/main/java/com/redhat/tpa/vulnerable/HelloController.java"
+DEMO_STATUS_NAMES = {
+    "woodstox-core": "Woodstox",
+    "json": "org.json",
+    "json-path": "json-path",
+    "httpclient": "Apache HttpClient",
+    "json-smart": "json-smart",
+    "commons-fileupload": "Commons FileUpload",
+    "commons-io": "Commons IO",
+    "h2": "H2 Database",
+    "plexus-utils": "plexus-utils",
+    "hutool-json": "hutool-json",
+}
+
+
+def update_demo_status(controller: str, artifact_id: str, new_version: str) -> str:
+    """Keep the demo app's /api/status remediation marker in sync with its POM."""
+    group_id, art_id = parse_artifact_id(artifact_id)
+    name = DEMO_STATUS_NAMES.get(art_id)
+    if not name:
+        return controller
+    # The version field documents the vulnerable baseline; lightwellFix is the
+    # remediated version that the smoke test checks after the Maven bump.
+    pattern = re.compile(
+        r'(results\.add\(check\("' + re.escape(name) + r'",\s*"'
+        + re.escape(group_id) + r'",\s*"[^"]+",\s*"[^"]*",\s*")'
+        + r'([^"]*)(")'
+    )
+    matches = list(pattern.finditer(controller))
+    if len(matches) != 1:
+        die(f"expected one /api/status row for {artifact_id}, found {len(matches)}")
+    match = matches[0]
+    return controller[:match.start(2)] + new_version + controller[match.end(2):]
+
+
 def resolve_project(path: str | None, project_id: int | None) -> dict:
     if project_id:
         return api_or_die("GET", f"/projects/{project_id}")
@@ -309,6 +344,22 @@ def cmd_bump_maven_mr(args: argparse.Namespace) -> None:
     if new_pom == pom:
         die(f"pom unchanged (already at {args.new_version}?)")
 
+    status_update = None
+    status_path = urllib.parse.quote(DEMO_STATUS_PATH, safe="")
+    try:
+        controller = api("GET", f"/projects/{pid}/repository/files/{status_path}/raw?ref={ref}", raw=True)
+    except GitlabHTTPError as e:
+        if e.code != 404:
+            die(str(e))
+    else:
+        updated_controller = update_demo_status(controller, args.artifact_id, args.new_version)
+        if updated_controller != controller:
+            status_update = {
+                "action": "update",
+                "file_path": DEMO_STATUS_PATH,
+                "content": updated_controller,
+            }
+
     branch_enc = urllib.parse.quote(branch, safe="")
     try:
         api("GET", f"/projects/{pid}/repository/branches/{branch_enc}")
@@ -326,19 +377,16 @@ def cmd_bump_maven_mr(args: argparse.Namespace) -> None:
         )
 
     commit_msg = f"chore(deps): update {args.artifact_id} to {args.new_version}"
+    actions = [{"action": "update", "file_path": args.pom_path, "content": new_pom}]
+    if status_update:
+        actions.append(status_update)
     api_or_die(
         "POST",
         f"/projects/{pid}/repository/commits",
         {
             "branch": branch,
             "commit_message": commit_msg,
-            "actions": [
-                {
-                    "action": "update",
-                    "file_path": args.pom_path,
-                    "content": new_pom,
-                }
-            ],
+            "actions": actions,
         },
     )
 

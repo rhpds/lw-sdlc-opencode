@@ -75,7 +75,7 @@ The CLI:
 
 1. Reads `pom.xml` from the default branch
 2. Creates branch `update-artifact-<sanitized-version>`
-3. Commits the dependency version bump
+3. Commits the dependency version bump and, for the demo app, updates the matching `/api/status` `lightwellFix` marker in `HelloController.java`
 4. Opens an MR whose description includes the human template **and** the `<!-- agent-handoff: do not edit below -->` JSON block
 
 Stdout JSON includes `merge_request_iid`, `merge_request_url`, `project_id`, `branch`.
