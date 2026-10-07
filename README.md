@@ -55,7 +55,7 @@ sequenceDiagram
 | 4 | AO launches JT **SDLC Trigger Impact Analyzer** → OpenCode **`impact-analyzer`**. |
 | 5 | Agent opens GitLab **MR** on **`update-artifact-*`**. |
 | 6 | GitLab MR webhook → EDA → JT **SDLC Resume Orchestrator** (or AO Wait) → JT **SDLC Trigger MR Verifier**. |
-| 7 | **`mr-verifier`** runs Job in `sdlc-sandboxes` + optional `pr-test-mr-*`, posts MR note. |
+| 7 | **`mr-verifier`** runs Job in `sdlc-sandboxes-<guid>` + optional `pr-test-mr-<guid>-*`, posts MR note. |
 
 Negative check: unrelated GAV → `count: 0` → AO ends without impact-analyzer.
 

@@ -15,12 +15,12 @@ Demo depth **A** target app is **Java/Maven** (`lw-demo-help-app` / `help-im-vul
 
 ## Permissions
 
-- Allowed: `mr-verify-ephemeral` skill; `bash` for `/app/scripts/gitlab_api.py`, **`oc`**, and **`kubectl`** for Jobs/namespaces/Routes in `sdlc-sandboxes` and `pr-test-mr-*`.
+- Allowed: `mr-verify-ephemeral` skill; `bash` for `/app/scripts/gitlab_api.py`, **`oc`**, and **`kubectl`** for Jobs/namespaces/Routes in `$SDLC_SANDBOX_NAMESPACE` and `${EPHEMERAL_NS_PREFIX}-*`.
 - Denied: `dependency-impact-remediation` skill; editing files in the OpenCode control-plane workspace; running **`mvn`**, **`gradle`**, or **`npm run build`** inside this pod.
 
 ## Cluster identity
 
-Before `oc apply`, run `oc whoami` and confirm the projected ServiceAccount has rights to create Jobs in `sdlc-sandboxes` and namespaces matching `pr-test-mr-*`.
+Before `oc apply`, run `oc whoami` and confirm the projected ServiceAccount has rights to create Jobs in `$SDLC_SANDBOX_NAMESPACE` and namespaces matching `${EPHEMERAL_NS_PREFIX}-*`.
 
 ## Credentials
 
