@@ -11,7 +11,7 @@
           "mr-verify-ephemeral": "deny"
         },
         "bash": {
-          "*": "ask",
+          "*": "allow",
           "python3 /app/scripts/gitlab_api.py *": "allow",
           "python3 scripts/gitlab_api.py *": "allow"
         }
