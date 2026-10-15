@@ -1,6 +1,8 @@
 ---
 # Prefer confidential client_credentials (tpa-cli) — per-tenant TPA uses that.
 # Fall back to password grant for older trustify-ui / uploader setups.
+# IMPORTANT: do not reuse one register across both uri tasks — a skipped task
+# still overwrites the register and wipes a successful client_credentials body.
 - name: Get TPA OAuth token via client_credentials
   ansible.builtin.uri:
     url: "{{ keycloak_url }}/realms/{{ keycloak_tpa_realm | default('trusted-profile-analyzer') }}/protocol/openid-connect/token"
@@ -12,7 +14,7 @@
       client_secret: "{{ tpa_oauth_client_secret }}"
     validate_certs: "{{ validate_certs | default(false) }}"
     status_code: [200]
-  register: tpa_token_response
+  register: tpa_token_cc
   no_log: true
   when:
     - tpa_access_token is not defined
@@ -30,7 +32,7 @@
       password: "{{ tpa_uploader_password }}"
     validate_certs: "{{ validate_certs | default(false) }}"
     status_code: [200]
-  register: tpa_token_response
+  register: tpa_token_pw
   no_log: true
   when:
     - tpa_access_token is not defined
@@ -38,6 +40,14 @@
 
 - name: Set TPA access token from OAuth response
   ansible.builtin.set_fact:
-    tpa_access_token: "{{ tpa_token_response.json.access_token }}"
-  when: tpa_access_token is not defined and tpa_token_response is succeeded
+    tpa_access_token: >-
+      {{
+        (tpa_token_cc.json.access_token)
+        if (tpa_token_cc is defined and tpa_token_cc is succeeded)
+        else (tpa_token_pw.json.access_token)
+      }}
+  when:
+    - tpa_access_token is not defined
+    - (tpa_token_cc is defined and tpa_token_cc is succeeded)
+      or (tpa_token_pw is defined and tpa_token_pw is succeeded)
   no_log: true
