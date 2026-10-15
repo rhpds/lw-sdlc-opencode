@@ -2,12 +2,11 @@
 # SDLC remediation — Event-Driven Ansible rulebook (Automation Orchestrator path)
 #
 # EDA is the sensor/bridge only:
-#   Nexus *.rhlw-*  → JT "SDLC Start Orchestrator"  → AO owns the run
-#   GitLab MR       → JT "SDLC Resume Orchestrator" → AO continue / Wait alternate
+#   Nexus *.rhlw-*  → JT "SDLC Start Orchestrator"  → AO owns the full run
 #
-# Worker playbooks (Query TPA, Impact Analyzer, MR Verifier) are launched as
-# AAP job-template nodes from the Automation Orchestrator canvas — not from
-# these rules. For the pre-AO chain, use sdlc-remediation-legacy.yml.
+# MR Verifier runs in-loop on the AO canvas after Impact. Do NOT resume AO on
+# GitLab MR open — that dual-fired Verifier and raced the in-loop agent.
+# For the pre-AO chain, use sdlc-remediation-legacy.yml.
 
 - name: SDLC OpenCode remediation
   hosts: all
@@ -60,37 +59,6 @@
               ao_client_id: "{{ ao_client_id }}"
               ao_client_secret: "{{ ao_client_secret }}"
               ao_start_webhook_path: "{{ ao_start_webhook_path }}"
-              guid: "{{ guid | default('') }}"
-
-    - name: GitLab merge request opened for dependency branch
-      condition: >
-        event.payload.object_kind is defined and
-        event.payload.object_kind == "merge_request" and
-        event.payload.object_attributes.action is defined and
-        event.payload.object_attributes.action == "open" and
-        event.payload.object_attributes.state is defined and
-        event.payload.object_attributes.state == "opened" and
-        event.payload.object_attributes.source_branch is defined and
-        event.payload.object_attributes.source_branch is match('update-artifact-.*')
-      action:
-        run_job_template:
-          name: "SDLC Resume Orchestrator"
-          organization: "{{ aap_organization_name }}"
-          job_args:
-            extra_vars:
-              merge_request_iid: "{{ event.payload.object_attributes.iid }}"
-              project_id: "{{ event.payload.project.id }}"
-              source_branch: "{{ event.payload.object_attributes.source_branch }}"
-              target_branch: "{{ event.payload.object_attributes.target_branch }}"
-              repository_git_url: "{{ event.payload.project.git_http_url | default(event.payload.project.http_url + '.git') }}"
-              opencode_base_url: "{{ opencode_base_url }}"
-              opencode_server_username: "{{ opencode_server_username | default('opencode') }}"
-              opencode_server_password: "{{ opencode_server_password }}"
-              aap_organization_name: "{{ aap_organization_name }}"
-              ao_base_url: "{{ ao_base_url }}"
-              ao_client_id: "{{ ao_client_id }}"
-              ao_client_secret: "{{ ao_client_secret }}"
-              ao_resume_webhook_path: "{{ ao_resume_webhook_path }}"
               guid: "{{ guid | default('') }}"
 
     - name: Log unmatched webhook events

@@ -1,24 +1,82 @@
 ---
-- name: Trigger OpenCode mr-verifier and wait for result
+# In-AO-loop MR Verifier.
+#
+# Default (smoke / reliable): GitLab MR must be open — approval already happens
+# on the AO canvas. OpenCode ephemeral verify is optional and currently races
+# a bash sed/grep loop in the image skill (4M+ tokens); keep it off until the
+# skill is fixed and the image rebuilt.
+- name: Trigger MR Verifier
   hosts: localhost
   gather_facts: false
   vars:
+    # Override with extra_var verifier_use_opencode=true to call OpenCode.
+    _verifier_use_opencode: false
     opencode_agent: mr-verifier
     opencode_skill: mr-verify-ephemeral
 
   tasks:
-    - name: Build MR payload for skill input
+    - name: Require MR coordinates
+      ansible.builtin.assert:
+        that:
+          - (merge_request_iid | default(0) | int) > 0
+          - (project_id | default(0) | int) > 0 or (gitlab_path | default('') | length) > 0
+          - (gitlab_url | default('') | length) > 0
+          - (gitlab_token | default(gitlab_pat | default('')) | length) > 0
+        fail_msg: "merge_request_iid, project_id/gitlab_path, gitlab_url, token required"
+
+    - name: Resolve project id
+      ansible.builtin.set_fact:
+        _project_id: "{{ project_id }}"
+      when: (project_id | default(0) | int) > 0
+
+    - name: Lookup project id from path
+      ansible.builtin.uri:
+        url: "{{ gitlab_url | regex_replace('/$', '') }}/api/v4/projects/{{ gitlab_path | regex_replace('/', '%2F') }}"
+        method: GET
+        headers:
+          PRIVATE-TOKEN: "{{ gitlab_token | default(gitlab_pat) }}"
+        status_code: [200]
+        validate_certs: "{{ validate_certs | default(false) }}"
+      register: _proj
+      when: (project_id | default(0) | int) < 1
+      no_log: true
+
+    - name: Set project id from lookup
+      ansible.builtin.set_fact:
+        _project_id: "{{ _proj.json.id }}"
+      when: (project_id | default(0) | int) < 1
+
+    - name: Fetch MR state
+      ansible.builtin.uri:
+        url: "{{ gitlab_url | regex_replace('/$', '') }}/api/v4/projects/{{ _project_id }}/merge_requests/{{ merge_request_iid }}"
+        method: GET
+        headers:
+          PRIVATE-TOKEN: "{{ gitlab_token | default(gitlab_pat) }}"
+        status_code: [200]
+        validate_certs: "{{ validate_certs | default(false) }}"
+      register: _mr
+      when: not (verifier_use_opencode | default(_verifier_use_opencode) | bool)
+
+    - name: Lightweight verifier — MR must be open
+      ansible.builtin.set_fact:
+        opencode_sync_ok: "{{ (_mr.json.state | default('')) == 'opened' }}"
+        opencode_sync_status: "{{ 'ok' if (_mr.json.state | default('')) == 'opened' else ('mr_' ~ (_mr.json.state | default('unknown'))) }}"
+      when: not (verifier_use_opencode | default(_verifier_use_opencode) | bool)
+
+    - name: Build MR payload for OpenCode skill input
       ansible.builtin.set_fact:
         opencode_input:
           merge_request_iid: "{{ merge_request_iid | int }}"
-          project_id: "{{ project_id | int }}"
+          project_id: "{{ _project_id | default(project_id) | int }}"
           source_branch: "{{ source_branch | default('') }}"
           target_branch: "{{ target_branch | default('main') }}"
           repository_git_url: "{{ repository_git_url | default('') }}"
           gitlab_path: "{{ gitlab_path | default('') }}"
+      when: verifier_use_opencode | default(_verifier_use_opencode) | bool
 
     - name: Invoke OpenCode mr-verifier synchronously
       ansible.builtin.import_tasks: tasks/opencode-prompt-sync.yml
+      when: verifier_use_opencode | default(_verifier_use_opencode) | bool
 
     - name: Export verifier artifacts for AO Switch
       ansible.builtin.set_stats:
@@ -26,7 +84,7 @@
           verifier_passed: "{{ opencode_sync_ok | default(false) | bool }}"
           verifier_status: "{{ opencode_sync_status | default('unknown') }}"
           merge_request_iid: "{{ merge_request_iid | int }}"
-          project_id: "{{ project_id | int }}"
+          project_id: "{{ _project_id | default(project_id) | int }}"
           gitlab_path: "{{ gitlab_path | default('') }}"
           approval: "{{ approval | default('needs_approval') }}"
           source_branch: "{{ source_branch | default('') }}"
