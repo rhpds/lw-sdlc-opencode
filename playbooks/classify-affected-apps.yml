@@ -1,0 +1,96 @@
+---
+# Load .lightwell/policy.json for each affected repo; split AO vs Renovate.
+# Builds classify comment body for snow-comment.yml.
+- name: Classify affected apps by Lightwell policy
+  hosts: localhost
+  gather_facts: false
+
+  tasks:
+    - name: Normalize candidate repos
+      ansible.builtin.set_fact:
+        _candidates: "{{ affected_repos | default([]) }}"
+
+    - name: Expand to multi-app demo list when mode requests it
+      ansible.builtin.set_fact:
+        _group: "{{ (remediation_app_gitlab_path | default('acme/wire-transfer-svc')).split('/')[0] }}"
+        _candidates: >-
+          {{
+            [
+              {
+                'gitlab_path': (remediation_app_gitlab_path | default('acme/wire-transfer-svc')).split('/')[0] ~ '/wire-transfer-svc',
+                'repo_url': (gitlab_url | regex_replace('/$', '')) ~ '/' ~ (remediation_app_gitlab_path | default('acme/wire-transfer-svc')).split('/')[0] ~ '/wire-transfer-svc.git',
+                'sbom_label': tpa_sbom_label | default(''),
+                'match_reason': 'multi_app_policy_demo',
+                'app_classification': 'demo',
+                'deployment_env': 'development'
+              },
+              {
+                'gitlab_path': (remediation_app_gitlab_path | default('acme/wire-transfer-svc')).split('/')[0] ~ '/benefits-mgmt-app',
+                'repo_url': (gitlab_url | regex_replace('/$', '')) ~ '/' ~ (remediation_app_gitlab_path | default('acme/wire-transfer-svc')).split('/')[0] ~ '/benefits-mgmt-app.git',
+                'sbom_label': tpa_sbom_label | default(''),
+                'match_reason': 'multi_app_policy_demo',
+                'app_classification': 'demo',
+                'deployment_env': 'development'
+              },
+              {
+                'gitlab_path': (remediation_app_gitlab_path | default('acme/wire-transfer-svc')).split('/')[0] ~ '/report-generator-app',
+                'repo_url': (gitlab_url | regex_replace('/$', '')) ~ '/' ~ (remediation_app_gitlab_path | default('acme/wire-transfer-svc')).split('/')[0] ~ '/report-generator-app.git',
+                'sbom_label': tpa_sbom_label | default(''),
+                'match_reason': 'multi_app_policy_demo',
+                'app_classification': 'demo',
+                'deployment_env': 'development'
+              }
+            ]
+          }}
+      when: (blast_radius_mode | default('')) == 'multi_app_policy_demo'
+
+    - name: Init classification lists
+      ansible.builtin.set_fact:
+        ao_apps: []
+        renovate_skips: []
+        policy_failures: []
+
+    - name: Classify each candidate
+      ansible.builtin.include_tasks: tasks/classify-one-app.yml
+      loop: "{{ _candidates }}"
+      loop_control:
+        loop_var: candidate_repo
+
+    - name: Build classify comment body
+      ansible.builtin.set_fact:
+        snow_comment_body: |
+          Blast-radius classification (guid={{ guid | default('') }}):
+          AO-eligible:
+          {% for a in ao_apps %}
+          - {{ a.gitlab_path }} — approval={{ a.approval }}
+          {% else %}
+          - (none)
+          {% endfor %}
+          Renovate skips (not in AO loop):
+          {% for r in renovate_skips %}
+          - {{ r.gitlab_path }}
+          {% else %}
+          - (none)
+          {% endfor %}
+          Policy failures (fail-closed):
+          {% for f in policy_failures %}
+          - {{ f.gitlab_path }} — {{ f.error }}
+          {% else %}
+          - (none)
+          {% endfor %}
+
+    - name: Export classification artifacts
+      ansible.builtin.set_stats:
+        data:
+          ao_apps: "{{ ao_apps }}"
+          renovate_skips: "{{ renovate_skips }}"
+          policy_failures: "{{ policy_failures }}"
+          snow_comment_body: "{{ snow_comment_body }}"
+          package_info: "{{ package_info | default({}) }}"
+          snow_incident: "{{ snow_incident | default('') }}"
+        per_host: false
+
+    - name: Fail when no AO-eligible apps
+      ansible.builtin.fail:
+        msg: "No AO-eligible apps after policy classify (renovate_skips={{ renovate_skips | length }}, failures={{ policy_failures | length }})"
+      when: (ao_apps | length) < 1

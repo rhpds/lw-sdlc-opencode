@@ -1,0 +1,77 @@
+---
+# Undraft + merge a verified GitLab MR (auto path or post-AO-Approval).
+- name: Merge GitLab merge request
+  hosts: localhost
+  gather_facts: false
+
+  tasks:
+    - name: Require MR coordinates and token
+      ansible.builtin.assert:
+        that:
+          - (gitlab_url | default('') | length) > 0
+          - (gitlab_token | default(gitlab_pat | default('')) | length) > 0
+          - (merge_request_iid | default(0) | int) > 0
+          - (project_id | default(0) | int) > 0 or (gitlab_path | default('') | length) > 0
+        fail_msg: "gitlab_url, token, merge_request_iid, and project_id/gitlab_path required"
+
+    - name: Resolve project id
+      ansible.builtin.set_fact:
+        _project_id: "{{ project_id }}"
+      when: (project_id | default(0) | int) > 0
+
+    - name: Lookup project id from path
+      ansible.builtin.uri:
+        url: "{{ gitlab_url | regex_replace('/$', '') }}/api/v4/projects/{{ gitlab_path | regex_replace('/', '%2F') }}"
+        method: GET
+        headers:
+          PRIVATE-TOKEN: "{{ gitlab_token | default(gitlab_pat) }}"
+        status_code: [200]
+        validate_certs: "{{ validate_certs | default(false) }}"
+      register: _proj
+      when: (project_id | default(0) | int) < 1
+      no_log: true
+
+    - name: Set project id from lookup
+      ansible.builtin.set_fact:
+        _project_id: "{{ _proj.json.id }}"
+      when: _proj is defined and _proj is succeeded
+
+    - name: Undraft MR
+      ansible.builtin.uri:
+        url: "{{ gitlab_url | regex_replace('/$', '') }}/api/v4/projects/{{ _project_id }}/merge_requests/{{ merge_request_iid }}"
+        method: PUT
+        headers:
+          PRIVATE-TOKEN: "{{ gitlab_token | default(gitlab_pat) }}"
+          Content-Type: application/json
+        body_format: json
+        body:
+          draft: false
+        status_code: [200]
+        validate_certs: "{{ validate_certs | default(false) }}"
+      no_log: true
+
+    - name: Merge MR
+      ansible.builtin.uri:
+        url: "{{ gitlab_url | regex_replace('/$', '') }}/api/v4/projects/{{ _project_id }}/merge_requests/{{ merge_request_iid }}/merge"
+        method: PUT
+        headers:
+          PRIVATE-TOKEN: "{{ gitlab_token | default(gitlab_pat) }}"
+          Content-Type: application/json
+        body_format: json
+        body:
+          should_remove_source_branch: false
+          merge_when_pipeline_succeeds: "{{ merge_when_pipeline_succeeds | default(false) }}"
+        status_code: [200, 201]
+        validate_certs: "{{ validate_certs | default(false) }}"
+      register: mr_merge
+      no_log: true
+
+    - name: Export merge artifacts
+      ansible.builtin.set_stats:
+        data:
+          merge_status: merged
+          merge_request_iid: "{{ merge_request_iid | int }}"
+          project_id: "{{ _project_id | int }}"
+          gitlab_path: "{{ gitlab_path | default('') }}"
+          iteration_outcome: merged
+        per_host: false

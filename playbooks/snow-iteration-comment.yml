@@ -1,0 +1,44 @@
+---
+# Per-iteration SNOW comment after Impact/Verifier/merge/reject.
+- name: Comment ServiceNow with per-iteration outcome
+  hosts: localhost
+  gather_facts: false
+  vars:
+    snow_base: "{{ snow_svc_url | default(snow_url | default(''), true) }}"
+
+  tasks:
+    - name: Require incident
+      ansible.builtin.assert:
+        that:
+          - (snow_base | default('') | length) > 0
+          - (snow_incident | default('') | length) > 0
+        fail_msg: "snow_base and snow_incident are required"
+
+    - name: Build iteration comment
+      ansible.builtin.set_fact:
+        snow_comment_body: |
+          Iteration outcome for {{ gitlab_path | default('unknown') }}:
+          - approval policy: {{ approval | default('n/a') }}
+          - outcome: {{ iteration_outcome | default('unknown') }}
+          - verifier: {{ verifier_status | default('n/a') }}
+          - MR: !{{ merge_request_iid | default('n/a') }}
+          - guid: {{ guid | default('') }}
+
+    - name: POST comment
+      ansible.builtin.uri:
+        url: "{{ snow_base | regex_replace('/$', '') }}/api/v1/incidents/{{ snow_incident }}/comments"
+        method: POST
+        body_format: json
+        body:
+          body: "{{ snow_comment_body }}"
+          created_by: "{{ snow_created_by | default('Lightwell AO') }}"
+          type: additional_comments
+        status_code: [201]
+        validate_certs: "{{ validate_certs | default(false) }}"
+
+    - name: Export artifacts
+      ansible.builtin.set_stats:
+        data:
+          snow_incident: "{{ snow_incident }}"
+          iteration_outcome: "{{ iteration_outcome | default('commented') }}"
+        per_host: false

@@ -1,0 +1,63 @@
+---
+# Fetch .lightwell/policy.json for gitlab_policy_path via GitLab API.
+# Requires: gitlab_url, gitlab_token (or gitlab_pat), gitlab_policy_path
+# Sets: app_policy (dict), app_policy_valid (bool), app_policy_error (str)
+
+- name: Encode path segments for GitLab API
+  ansible.builtin.set_fact:
+    _policy_project_enc: "{{ gitlab_policy_path | regex_replace('/', '%2F') }}"
+    _policy_file_enc: "{{ '.lightwell/policy.json' | regex_replace('/', '%2F') }}"
+
+- name: GET .lightwell/policy.json from GitLab
+  ansible.builtin.uri:
+    url: "{{ gitlab_url | regex_replace('/$', '') }}/api/v4/projects/{{ _policy_project_enc }}/repository/files/{{ _policy_file_enc }}/raw?ref={{ gitlab_default_branch | default('main') }}"
+    method: GET
+    headers:
+      PRIVATE-TOKEN: "{{ gitlab_token | default(gitlab_pat | default('')) }}"
+    status_code: [200, 401, 403, 404]
+    validate_certs: "{{ validate_certs | default(false) }}"
+    return_content: true
+  register: _policy_raw
+  no_log: true
+
+- name: Default policy invalid
+  ansible.builtin.set_fact:
+    app_policy: {}
+    app_policy_valid: false
+    app_policy_error: "missing_or_unreadable"
+
+- name: Parse policy JSON when HTTP 200
+  block:
+    - name: from_json
+      ansible.builtin.set_fact:
+        app_policy: "{{ _policy_raw.content | from_json }}"
+        app_policy_valid: true
+        app_policy_error: ""
+  rescue:
+    - name: Invalid JSON
+      ansible.builtin.set_fact:
+        app_policy: {}
+        app_policy_valid: false
+        app_policy_error: "invalid_json"
+  when: _policy_raw.status == 200
+
+- name: Validate policy schema (fail-closed)
+  ansible.builtin.set_fact:
+    app_policy_valid: false
+    app_policy_error: "invalid_schema"
+  when: >
+    app_policy_valid | bool
+    and (
+      (app_policy.remediation_owner | default('') | length) == 0
+      or (
+        (app_policy.remediation_owner | default('')) == 'ao'
+        and (app_policy.approval | default('')) not in ['auto', 'needs_approval']
+      )
+      or (app_policy.remediation_owner | default('')) not in ['ao', 'renovate']
+    )
+
+- name: Record HTTP failure reason
+  ansible.builtin.set_fact:
+    app_policy_valid: false
+    app_policy_error: "http_{{ _policy_raw.status | default('error') }}"
+  when: _policy_raw.status is defined and _policy_raw.status != 200

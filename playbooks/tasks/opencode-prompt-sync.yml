@@ -1,0 +1,32 @@
+---
+# Like opencode-prompt-async.yml but polls the session until the agent finishes
+# (or timeout). Sets opencode_sync_ok / opencode_sync_status for set_stats.
+# Requires: opencode_base_url, opencode_agent, opencode_skill, opencode_input
+
+- name: Import async start
+  ansible.builtin.import_tasks: opencode-prompt-async.yml
+
+- name: Poll OpenCode session until idle or timeout
+  ansible.builtin.uri:
+    url: "{{ opencode_base_url }}/session/{{ opencode_session_id }}"
+    method: GET
+    headers:
+      Authorization: "Basic {{ opencode_basic_auth_b64 }}"
+    status_code: [200]
+    validate_certs: "{{ validate_certs | default(false) }}"
+  register: oc_poll
+  until: >-
+    (oc_poll.json.status | default(oc_poll.json.session.status | default(''))) in ['idle', 'complete', 'completed', 'done', 'error', 'failed']
+    or (oc_poll.json.time | default({})).completed is defined
+  retries: "{{ opencode_sync_retries | default(60) | int }}"
+  delay: "{{ opencode_sync_delay | default(10) | int }}"
+  failed_when: false
+
+- name: Derive sync status
+  ansible.builtin.set_fact:
+    opencode_sync_status: "{{ oc_poll.json.status | default(oc_poll.json.session.status | default('unknown')) }}"
+    opencode_sync_ok: >-
+      {{
+        (oc_poll.status | default(0) | int) == 200
+        and (oc_poll.json.status | default(oc_poll.json.session.status | default('idle'))) not in ['error', 'failed']
+      }}

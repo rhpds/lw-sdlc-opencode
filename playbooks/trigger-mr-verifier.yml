@@ -1,5 +1,5 @@
 ---
-- name: Trigger OpenCode mr-verifier from GitLab MR webhook
+- name: Trigger OpenCode mr-verifier and wait for result
   hosts: localhost
   gather_facts: false
   vars:
@@ -12,9 +12,31 @@
         opencode_input:
           merge_request_iid: "{{ merge_request_iid | int }}"
           project_id: "{{ project_id | int }}"
-          source_branch: "{{ source_branch }}"
+          source_branch: "{{ source_branch | default('') }}"
           target_branch: "{{ target_branch | default('main') }}"
-          repository_git_url: "{{ repository_git_url }}"
+          repository_git_url: "{{ repository_git_url | default('') }}"
+          gitlab_path: "{{ gitlab_path | default('') }}"
 
-    - name: Invoke OpenCode mr-verifier
-      ansible.builtin.import_tasks: tasks/opencode-prompt-async.yml
+    - name: Invoke OpenCode mr-verifier synchronously
+      ansible.builtin.import_tasks: tasks/opencode-prompt-sync.yml
+
+    - name: Export verifier artifacts for AO Switch
+      ansible.builtin.set_stats:
+        data:
+          verifier_passed: "{{ opencode_sync_ok | default(false) | bool }}"
+          verifier_status: "{{ opencode_sync_status | default('unknown') }}"
+          merge_request_iid: "{{ merge_request_iid | int }}"
+          project_id: "{{ project_id | int }}"
+          gitlab_path: "{{ gitlab_path | default('') }}"
+          approval: "{{ approval | default('needs_approval') }}"
+          source_branch: "{{ source_branch | default('') }}"
+          target_branch: "{{ target_branch | default('main') }}"
+          repository_git_url: "{{ repository_git_url | default('') }}"
+          snow_incident: "{{ snow_incident | default('') }}"
+          iteration_outcome: "{{ 'verifier_pass' if (opencode_sync_ok | default(false) | bool) else 'verifier_fail' }}"
+        per_host: false
+
+    - name: Fail JT when verifier did not pass (AO continue_on_failure isolates iteration)
+      ansible.builtin.fail:
+        msg: "MR Verifier failed for MR !{{ merge_request_iid }} (status={{ opencode_sync_status | default('unknown') }})"
+      when: not (opencode_sync_ok | default(false) | bool)

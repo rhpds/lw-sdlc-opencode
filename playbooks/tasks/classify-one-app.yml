@@ -1,0 +1,37 @@
+---
+- name: Fetch policy for {{ candidate_repo.gitlab_path }}
+  ansible.builtin.include_tasks: fetch-app-policy.yml
+  vars:
+    gitlab_policy_path: "{{ candidate_repo.gitlab_path }}"
+
+- name: Append Renovate skip
+  ansible.builtin.set_fact:
+    renovate_skips: "{{ renovate_skips + [candidate_repo | combine({'remediation_owner': 'renovate'})] }}"
+  when: app_policy_valid | bool and (app_policy.remediation_owner | default('')) == 'renovate'
+
+- name: Append AO app
+  ansible.builtin.set_fact:
+    ao_apps: >-
+      {{
+        ao_apps + [
+          candidate_repo | combine({
+            'remediation_owner': 'ao',
+            'approval': app_policy.approval,
+            'policy': app_policy
+          })
+        ]
+      }}
+  when: app_policy_valid | bool and (app_policy.remediation_owner | default('')) == 'ao'
+
+- name: Append policy failure (fail-closed)
+  ansible.builtin.set_fact:
+    policy_failures: >-
+      {{
+        policy_failures + [
+          candidate_repo | combine({
+            'error': app_policy_error | default('invalid'),
+            'remediation_owner': 'unknown'
+          })
+        ]
+      }}
+  when: not (app_policy_valid | bool)

@@ -1,0 +1,61 @@
+---
+# Create a ServiceNow mock incident at AO start (before Query TPA).
+- name: Create ServiceNow incident for remediation run
+  hosts: localhost
+  gather_facts: false
+  vars:
+    snow_base: "{{ snow_svc_url | default(snow_url | default(''), true) }}"
+
+  tasks:
+    - name: Require snow URL
+      ansible.builtin.assert:
+        that:
+          - (snow_base | default('') | length) > 0
+        fail_msg: "snow_url or snow_svc_url is required"
+
+    - name: Build incident description
+      ansible.builtin.set_fact:
+        _snow_short: >-
+          Lightwell remediation arrived — {{ cve_id | default('unknown') }}
+          {{ artifact_group | default('') }}:{{ artifact_name | default(package_purl | default('')) }}
+        _snow_desc: |
+          Lightwell AO remediation run started.
+          guid: {{ guid | default('') }}
+          CVE: {{ cve_id | default('unknown') }}
+          package: {{ package_purl | default(artifact_name | default('')) }}
+          vulnerable: {{ vulnerable_version | default('') }}
+          fix: {{ fix_version | default(artifact_version | default('')) }}
+          severity: {{ severity | default('medium') }}
+
+    - name: POST incident to snow-mock
+      ansible.builtin.uri:
+        url: "{{ snow_base | regex_replace('/$', '') }}/api/v1/incidents"
+        method: POST
+        body_format: json
+        body:
+          short_description: "{{ _snow_short | truncate(160, true, '') }}"
+          description: "{{ _snow_desc }}"
+          caller_id: "{{ snow_caller_id | default('lightwell.ao@example.com') }}"
+          created_by: "{{ snow_created_by | default('Lightwell AO') }}"
+          opened_by: "{{ snow_created_by | default('Lightwell AO') }}"
+          assignment_group: "{{ snow_assignment_group | default('Application Support') }}"
+          priority: "{{ snow_priority | default('2 - High') }}"
+          impact: "{{ snow_impact | default('2 - Medium') }}"
+          category: Software
+          subcategory: Application
+          channel: Monitoring
+          state: New
+        status_code: [201]
+        validate_certs: "{{ validate_certs | default(false) }}"
+      register: snow_create
+
+    - name: Export snow_incident for AO
+      ansible.builtin.set_stats:
+        data:
+          snow_incident: "{{ snow_create.json.result.number }}"
+          snow_incident_sys: "{{ snow_create.json.result }}"
+        per_host: false
+
+    - name: Show created incident
+      ansible.builtin.debug:
+        msg: "Created {{ snow_create.json.result.number }}"

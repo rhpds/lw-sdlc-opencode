@@ -308,6 +308,7 @@ def cmd_mr_create(args: argparse.Namespace) -> None:
         "title": args.title,
         "description": args.description or "",
         "remove_source_branch": False,
+        "draft": bool(getattr(args, "draft", False)),
     }
     out(api_or_die("POST", f"/projects/{pid}/merge_requests", body))
 
@@ -328,6 +329,39 @@ def cmd_mr_note(args: argparse.Namespace) -> None:
             {"body": args.body},
         )
     )
+
+
+def cmd_mr_update(args: argparse.Namespace) -> None:
+    """Update MR fields (draft / title / description)."""
+    project = resolve_project(args.path, args.project_id)
+    pid = project["id"]
+    body: dict = {}
+    if args.draft is not None:
+        body["draft"] = bool(args.draft)
+    if args.title:
+        body["title"] = args.title
+    if args.description is not None:
+        body["description"] = args.description
+    if not body:
+        die("mr-update requires at least one of --draft/--title/--description")
+    out(api_or_die("PUT", f"/projects/{pid}/merge_requests/{args.mr_iid}", body))
+
+
+def cmd_mr_merge(args: argparse.Namespace) -> None:
+    """Mark MR ready (undraft) then merge."""
+    project = resolve_project(args.path, args.project_id)
+    pid = project["id"]
+    iid = args.mr_iid
+    # Undraft first so CE/EE allow merge without WIP gates.
+    try:
+        api("PUT", f"/projects/{pid}/merge_requests/{iid}", {"draft": False})
+    except GitlabHTTPError:
+        pass
+    body = {
+        "should_remove_source_branch": bool(args.remove_source_branch),
+        "merge_when_pipeline_succeeds": bool(args.merge_when_pipeline_succeeds),
+    }
+    out(api_or_die("PUT", f"/projects/{pid}/merge_requests/{iid}/merge", body))
 
 
 def cmd_bump_maven_mr(args: argparse.Namespace) -> None:
@@ -423,6 +457,7 @@ def cmd_bump_maven_mr(args: argparse.Namespace) -> None:
                 "target_branch": default_branch,
                 "title": title,
                 "description": description,
+                "draft": bool(getattr(args, "draft", True)),
             },
         )
         iid = int(mr["iid"])
@@ -497,6 +532,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--target-branch", default="main")
     sp.add_argument("--title", required=True)
     sp.add_argument("--description", default="")
+    sp.add_argument("--draft", action="store_true", help="create as draft/WIP MR")
     sp.set_defaults(func=cmd_mr_create)
 
     sp = sub.add_parser("mr-get", help="Get a merge request")
@@ -510,9 +546,24 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--body", required=True)
     sp.set_defaults(func=cmd_mr_note)
 
+    sp = sub.add_parser("mr-update", help="Update MR fields (draft, title, description)")
+    add_project_flags(sp)
+    sp.add_argument("--mr-iid", type=int, required=True)
+    sp.add_argument("--draft", type=lambda v: str(v).lower() in ("1", "true", "yes"), default=None)
+    sp.add_argument("--title", default="")
+    sp.add_argument("--description", default=None)
+    sp.set_defaults(func=cmd_mr_update)
+
+    sp = sub.add_parser("mr-merge", help="Undraft and merge a merge request")
+    add_project_flags(sp)
+    sp.add_argument("--mr-iid", type=int, required=True)
+    sp.add_argument("--remove-source-branch", action="store_true")
+    sp.add_argument("--merge-when-pipeline-succeeds", action="store_true")
+    sp.set_defaults(func=cmd_mr_merge)
+
     sp = sub.add_parser(
         "bump-maven-mr",
-        help="Demo A: bump Maven dependency in pom.xml, push branch, open MR with handoff JSON",
+        help="Demo A: bump Maven dependency in pom.xml, push branch, open draft MR with handoff JSON",
     )
     add_project_flags(sp)
     sp.add_argument("--artifact-id", required=True, help="group:artifact")
@@ -521,6 +572,19 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--target-branch", default="")
     sp.add_argument("--branch", default="", help="default update-artifact-<version>")
     sp.add_argument("--impact-text", default="", help="Impact Analysis paragraph for MR body")
+    sp.add_argument(
+        "--draft",
+        dest="draft",
+        action="store_true",
+        default=True,
+        help="create draft MR (default)",
+    )
+    sp.add_argument(
+        "--no-draft",
+        dest="draft",
+        action="store_false",
+        help="create a ready (non-draft) MR",
+    )
     sp.set_defaults(func=cmd_bump_maven_mr)
 
     return p

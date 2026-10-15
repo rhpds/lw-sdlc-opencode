@@ -1,0 +1,37 @@
+---
+# Post a comment on an existing snow-mock incident.
+# Requires: snow_incident, snow_comment_body; snow_svc_url or snow_url
+- name: Post ServiceNow incident comment
+  hosts: localhost
+  gather_facts: false
+  vars:
+    snow_base: "{{ snow_svc_url | default(snow_url | default(''), true) }}"
+
+  tasks:
+    - name: Require incident and comment
+      ansible.builtin.assert:
+        that:
+          - (snow_base | default('') | length) > 0
+          - (snow_incident | default('') | length) > 0
+          - (snow_comment_body | default('') | length) > 0
+        fail_msg: "snow_base, snow_incident, and snow_comment_body are required"
+
+    - name: POST comment
+      ansible.builtin.uri:
+        url: "{{ snow_base | regex_replace('/$', '') }}/api/v1/incidents/{{ snow_incident }}/comments"
+        method: POST
+        body_format: json
+        body:
+          body: "{{ snow_comment_body }}"
+          created_by: "{{ snow_created_by | default('Lightwell AO') }}"
+          type: "{{ snow_comment_type | default('additional_comments') }}"
+        status_code: [201]
+        validate_certs: "{{ validate_certs | default(false) }}"
+      register: snow_comment
+
+    - name: Export last comment id
+      ansible.builtin.set_stats:
+        data:
+          snow_last_comment_id: "{{ snow_comment.json.result.sys_id | default('') }}"
+          snow_incident: "{{ snow_incident }}"
+        per_host: false

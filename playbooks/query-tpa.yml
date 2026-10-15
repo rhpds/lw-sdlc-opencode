@@ -108,6 +108,31 @@
           query: "{{ package_purl | default(resolved_artifact_id, true) }}"
         per_host: false
 
+    # multi_app_policy_demo: classify expands to the three Acme apps even when
+    # TPA still has the Red Hat product dataset (no Acme SBOMs yet). Soft-pass.
+    - name: Soft-pass empty blast radius for multi_app_policy_demo
+      ansible.builtin.set_fact:
+        affected_repos: "{{ affected_repos | default([]) }}"
+        blast_radius:
+          mode: multi_app_policy_demo
+          count: 3
+          note: "synthetic — classify expands to seeded Acme apps"
+      when: >
+        (blast_radius_mode | default('')) == 'multi_app_policy_demo'
+        and (blast_radius.count | default(0) | int) < 1
+
+    - name: Re-export artifacts after soft-pass
+      ansible.builtin.set_stats:
+        data:
+          package_info: "{{ package_info }}"
+          affected_repos: "{{ affected_repos }}"
+          blast_radius: "{{ blast_radius }}"
+          query: "{{ package_purl | default(resolved_artifact_id, true) }}"
+        per_host: false
+      when: >
+        (blast_radius_mode | default('')) == 'multi_app_policy_demo'
+        and (blast_radius.note | default('')) | length > 0
+
     # AO canvas gates Impact on Query TPA job success. Legacy EDA already received
     # the tpa_results callback above when eda_webhook_url is set.
     - name: Fail when blast radius is empty (AO does not launch Impact)
@@ -116,3 +141,4 @@
           No blast radius for {{ resolved_artifact_id | default('unknown') }}
           (SBOM label {{ tpa_sbom_label | default('') }}). Skipping remediation.
       when: (blast_radius.count | default(0) | int) < 1
+

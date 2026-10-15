@@ -39,8 +39,11 @@
           opencode_base_url: "{{ opencode_base_url | default('') }}"
           opencode_server_username: "{{ opencode_server_username | default('opencode') }}"
           opencode_server_password: "{{ opencode_server_password | default('') }}"
-          blast_radius_mode: "{{ blast_radius_mode | default('single_app_demo_a') }}"
+          blast_radius_mode: "{{ blast_radius_mode | default('multi_app_policy_demo') }}"
           aap_organization_name: "{{ aap_organization_name | default('Default') }}"
+          snow_url: "{{ snow_url | default('') }}"
+          snow_svc_url: "{{ snow_svc_url | default('') }}"
+          gitlab_token: "{{ gitlab_token | default(gitlab_pat | default('')) }}"
 
     - name: Trigger Automation Orchestrator start webhook
       ansible.builtin.import_tasks: tasks/trigger-ao-webhook.yml

@@ -1,0 +1,58 @@
+---
+# Final SNOW update/close after AO Converge / loop done.
+- name: Finalize ServiceNow incident after remediation run
+  hosts: localhost
+  gather_facts: false
+  vars:
+    snow_base: "{{ snow_svc_url | default(snow_url | default(''), true) }}"
+    snow_final_state: "{{ snow_final_state | default('Resolved') }}"
+
+  tasks:
+    - name: Require incident
+      ansible.builtin.assert:
+        that:
+          - (snow_base | default('') | length) > 0
+          - (snow_incident | default('') | length) > 0
+        fail_msg: "snow_base and snow_incident are required"
+
+    - name: Build final summary comment
+      ansible.builtin.set_fact:
+        _final_body: >-
+          {{ snow_comment_body | default(
+            'Lightwell AO remediation run finished (guid=' ~ (guid | default(''))
+            ~ '). See prior comments for per-app outcomes.'
+          ) }}
+
+    - name: Post final comment
+      ansible.builtin.uri:
+        url: "{{ snow_base | regex_replace('/$', '') }}/api/v1/incidents/{{ snow_incident }}/comments"
+        method: POST
+        body_format: json
+        body:
+          body: "{{ _final_body }}"
+          created_by: "{{ snow_created_by | default('Lightwell AO') }}"
+          type: additional_comments
+        status_code: [201]
+        validate_certs: "{{ validate_certs | default(false) }}"
+      register: snow_final_comment
+
+    - name: PATCH incident state
+      ansible.builtin.uri:
+        url: "{{ snow_base | regex_replace('/$', '') }}/api/v1/incidents/{{ snow_incident }}"
+        method: PATCH
+        body_format: json
+        body:
+          state: "{{ snow_final_state }}"
+          resolution_code: "{{ snow_resolution_code | default('Solved (Permanently)') }}"
+          resolution_notes: "{{ _final_body }}"
+          resolved_by: "{{ snow_created_by | default('Lightwell AO') }}"
+        status_code: [200]
+        validate_certs: "{{ validate_certs | default(false) }}"
+      register: snow_final_patch
+
+    - name: Export finalize artifacts
+      ansible.builtin.set_stats:
+        data:
+          snow_incident: "{{ snow_incident }}"
+          snow_final_state: "{{ snow_final_state }}"
+        per_host: false
