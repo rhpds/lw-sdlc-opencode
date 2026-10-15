@@ -1,5 +1,24 @@
 ---
-- name: Get TPA OAuth token from Keycloak
+# Prefer confidential client_credentials (tpa-cli) — per-tenant TPA uses that.
+# Fall back to password grant for older trustify-ui / uploader setups.
+- name: Get TPA OAuth token via client_credentials
+  ansible.builtin.uri:
+    url: "{{ keycloak_url }}/realms/{{ keycloak_tpa_realm | default('trusted-profile-analyzer') }}/protocol/openid-connect/token"
+    method: POST
+    body_format: form-urlencoded
+    body:
+      grant_type: client_credentials
+      client_id: "{{ tpa_oauth_client_id | default('tpa-cli') }}"
+      client_secret: "{{ tpa_oauth_client_secret }}"
+    validate_certs: "{{ validate_certs | default(false) }}"
+    status_code: [200]
+  register: tpa_token_response
+  no_log: true
+  when:
+    - tpa_access_token is not defined
+    - (tpa_oauth_client_secret | default('') | length) > 0
+
+- name: Get TPA OAuth token via password grant
   ansible.builtin.uri:
     url: "{{ keycloak_url }}/realms/{{ keycloak_tpa_realm | default('trusted-profile-analyzer') }}/protocol/openid-connect/token"
     method: POST
@@ -13,7 +32,9 @@
     status_code: [200]
   register: tpa_token_response
   no_log: true
-  when: tpa_access_token is not defined
+  when:
+    - tpa_access_token is not defined
+    - (tpa_oauth_client_secret | default('') | length) == 0
 
 - name: Set TPA access token from OAuth response
   ansible.builtin.set_fact:

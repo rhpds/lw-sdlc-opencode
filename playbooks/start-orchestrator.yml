@@ -30,9 +30,11 @@
           keycloak_url: "{{ keycloak_url | default('') }}"
           keycloak_tpa_realm: "{{ keycloak_tpa_realm | default('trusted-profile-analyzer') }}"
           tpa_uploader_username: "{{ tpa_uploader_username | default('') }}"
-          tpa_oauth_client_id: "{{ tpa_oauth_client_id | default('trustify-ui') }}"
+          tpa_oauth_client_id: "{{ tpa_oauth_client_id | default('tpa-cli') }}"
+          tpa_oauth_client_secret: "{{ tpa_oauth_client_secret | default('') }}"
           tpa_uploader_password: "{{ tpa_uploader_password | default('') }}"
           tpa_sbom_label: "{{ tpa_sbom_label | default('') }}"
+
           gitlab_url: "{{ gitlab_url | default('') }}"
           remediation_app_gitlab_path: "{{ remediation_app_gitlab_path | default('') }}"
           eda_webhook_url: "{{ eda_webhook_url | default('') }}"
