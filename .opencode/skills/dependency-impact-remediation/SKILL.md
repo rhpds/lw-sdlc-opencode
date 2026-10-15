@@ -71,14 +71,16 @@ python3 /app/scripts/gitlab_api.py bump-maven-mr \
   --impact-text "<your Impact Analysis paragraph>"
 ```
 
+Default: open a **draft** MR (`--draft`; use `--no-draft` only if explicitly required). AO merges after Verifier (+ Approval when policy says `needs_approval`).
+
 The CLI:
 
 1. Reads `pom.xml` from the default branch
 2. Creates branch `update-artifact-<sanitized-version>`
 3. Commits the dependency version bump and, for the demo app, updates the matching `/api/status` `lightwellFix` marker in `HelloController.java`
-4. Opens an MR whose description includes the human template **and** the `<!-- agent-handoff: do not edit below -->` JSON block
+4. Opens a **draft** MR whose description includes the human template **and** the `<!-- agent-handoff: do not edit below -->` JSON block
 
-Stdout JSON includes `merge_request_iid`, `merge_request_url`, `project_id`, `branch`.
+Stdout JSON includes `merge_request_iid`, `merge_request_url`, `project_id`, `branch`. When input JSON has `"draft_mr": true` (AO path), always keep the MR as draft.
 
 ### Manual fallback (only if one-shot fails)
 
