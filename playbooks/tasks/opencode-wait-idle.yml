@@ -1,0 +1,43 @@
+---
+# Wait until OpenCode reports the session idle via the documented status API:
+#   GET /session/status  →  { [sessionID]: SessionStatus }
+# SessionStatus is {type: "idle"|"busy"|"retry", ...}. Idle sessions are
+# omitted from the map (see opencode SessionStatus.list) — treat missing as idle.
+# Docs: https://opencode.ai/docs/server/
+#
+# Requires: opencode_base_url, opencode_session_id, opencode_basic_auth_b64
+# Sets: opencode_sync_status, opencode_sync_ok
+
+# Avoid a false idle if we poll before prompt_async registers as busy.
+- name: Settle so /session/status can register busy
+  ansible.builtin.pause:
+    seconds: "{{ opencode_status_settle_seconds | default(2) | int }}"
+
+- name: Poll GET /session/status until this session is idle
+  ansible.builtin.uri:
+    url: "{{ opencode_base_url }}/session/status"
+    method: GET
+    headers:
+      Authorization: "Basic {{ opencode_basic_auth_b64 }}"
+    status_code: [200]
+    validate_certs: "{{ validate_certs | default(false) }}"
+  register: oc_status_poll
+  vars:
+    _oc_entry: "{{ oc_status_poll.json[opencode_session_id] | default({'type': 'idle'}) }}"
+  until: (_oc_entry.type | default('idle')) == 'idle'
+  retries: "{{ opencode_sync_retries | default(90) | int }}"
+  delay: "{{ opencode_sync_delay | default(2) | int }}"
+  failed_when: false
+
+- name: Capture final session status entry
+  ansible.builtin.set_fact:
+    _oc_status_entry: "{{ oc_status_poll.json[opencode_session_id] | default({'type': 'idle'}) }}"
+
+- name: Derive sync status from /session/status
+  ansible.builtin.set_fact:
+    opencode_sync_status: "{{ _oc_status_entry.type | default('idle') }}"
+    opencode_sync_ok: >-
+      {{
+        (oc_status_poll.status | default(0) | int) == 200
+        and (_oc_status_entry.type | default('idle')) == 'idle'
+      }}

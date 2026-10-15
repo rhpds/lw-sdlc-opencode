@@ -6,43 +6,27 @@
   gather_facts: false
 
   tasks:
-    - name: Normalize candidate repos
+    # Candidates MUST come from Query TPA artifacts (affected_repos). Do not
+    # invent the three Acme apps here — that discarded real TPA matches and
+    # sent Impact at repos that do not contain the vulnerable GAV (no MR).
+    - name: Normalize candidate repos from TPA affected_repos
       ansible.builtin.set_fact:
         _candidates: "{{ affected_repos | default([]) }}"
 
-    - name: Expand to multi-app demo list when mode requests it
-      ansible.builtin.set_fact:
-        _group: "{{ (remediation_app_gitlab_path | default('acme/wire-transfer-svc')).split('/')[0] }}"
-        _candidates: >-
-          {{
-            [
-              {
-                'gitlab_path': (remediation_app_gitlab_path | default('acme/wire-transfer-svc')).split('/')[0] ~ '/wire-transfer-svc',
-                'repo_url': (gitlab_url | regex_replace('/$', '')) ~ '/' ~ (remediation_app_gitlab_path | default('acme/wire-transfer-svc')).split('/')[0] ~ '/wire-transfer-svc.git',
-                'sbom_label': tpa_sbom_label | default(''),
-                'match_reason': 'multi_app_policy_demo',
-                'app_classification': 'demo',
-                'deployment_env': 'development'
-              },
-              {
-                'gitlab_path': (remediation_app_gitlab_path | default('acme/wire-transfer-svc')).split('/')[0] ~ '/benefits-mgmt-app',
-                'repo_url': (gitlab_url | regex_replace('/$', '')) ~ '/' ~ (remediation_app_gitlab_path | default('acme/wire-transfer-svc')).split('/')[0] ~ '/benefits-mgmt-app.git',
-                'sbom_label': tpa_sbom_label | default(''),
-                'match_reason': 'multi_app_policy_demo',
-                'app_classification': 'demo',
-                'deployment_env': 'development'
-              },
-              {
-                'gitlab_path': (remediation_app_gitlab_path | default('acme/wire-transfer-svc')).split('/')[0] ~ '/report-generator-app',
-                'repo_url': (gitlab_url | regex_replace('/$', '')) ~ '/' ~ (remediation_app_gitlab_path | default('acme/wire-transfer-svc')).split('/')[0] ~ '/report-generator-app.git',
-                'sbom_label': tpa_sbom_label | default(''),
-                'match_reason': 'multi_app_policy_demo',
-                'app_classification': 'demo',
-                'deployment_env': 'development'
-              }
-            ]
-          }}
-      when: (blast_radius_mode | default('')) == 'multi_app_policy_demo'
+    - name: Show blast-radius input for AO/AAP logs
+      ansible.builtin.debug:
+        msg: >-
+          classify candidates={{ _candidates | length }}
+          (from query_tpa.affected_repos; blast_radius_mode={{ blast_radius_mode | default('') }};
+          blast_radius={{ blast_radius | default({}) }})
+          paths={{ _candidates | map(attribute='gitlab_path') | list }}
+
+    - name: Fail when TPA returned no affected repos
+      ansible.builtin.fail:
+        msg: >-
+          Query TPA returned empty affected_repos — nothing to classify.
+          Fix TPA/SBOM matching rather than synthesizing apps in classify.
+      when: (_candidates | length) < 1
 
     - name: Init classification lists
       ansible.builtin.set_fact:
@@ -50,7 +34,7 @@
         renovate_skips: []
         policy_failures: []
 
-    - name: Classify each candidate
+    - name: Classify each TPA-affected candidate
       ansible.builtin.include_tasks: tasks/classify-one-app.yml
       loop: "{{ _candidates }}"
       loop_control:
@@ -59,10 +43,10 @@
     - name: Build classify comment body
       ansible.builtin.set_fact:
         snow_comment_body: |
-          Blast-radius classification (guid={{ guid | default('') }}):
+          Blast-radius classification (guid={{ guid | default('') }}; tpa_affected={{ _candidates | length }}):
           AO-eligible:
           {% for a in ao_apps %}
-          - {{ a.gitlab_path }} — approval={{ a.approval }}
+          - {{ a.gitlab_path }} — approval={{ a.approval }} ({{ a.match_reason | default('tpa') }})
           {% else %}
           - (none)
           {% endfor %}

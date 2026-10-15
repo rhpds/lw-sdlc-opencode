@@ -68,22 +68,10 @@
       ansible.builtin.import_tasks: tasks/opencode-prompt-async.yml
       when: (_iter_repos | length) >= 1
 
-    - name: Wait for OpenCode session to go idle (best-effort)
-      ansible.builtin.uri:
-        url: "{{ opencode_base_url }}/session/{{ opencode_session_id }}"
-        method: GET
-        headers:
-          Authorization: "Basic {{ opencode_basic_auth_b64 }}"
-        status_code: [200]
-        validate_certs: "{{ validate_certs | default(false) }}"
-      register: oc_idle_poll
-      until: >-
-        (oc_idle_poll.json.status | default(oc_idle_poll.json.session.status | default(''))) in
-        ['idle', 'complete', 'completed', 'done', 'error', 'failed']
-        or (oc_idle_poll.json.time | default({})).completed is defined
-      retries: "{{ opencode_sync_retries | default(60) | int }}"
-      delay: "{{ opencode_sync_delay | default(10) | int }}"
-      failed_when: false
+    # Docs: GET /session/status — idle sessions are omitted from the map.
+    # Do NOT poll GET /session/:id (no status field) or /session/:id/status (SPA HTML).
+    - name: Wait for OpenCode session to go idle
+      ansible.builtin.import_tasks: tasks/opencode-wait-idle.yml
       when: (_iter_repos | length) >= 1 and (opencode_session_id | default('') | length) > 0
 
     - name: Poll GitLab until draft remediation MR exists
