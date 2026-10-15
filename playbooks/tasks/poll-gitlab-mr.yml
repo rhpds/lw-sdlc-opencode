@@ -1,0 +1,73 @@
+---
+# After Impact OpenCode runs, poll GitLab until a draft remediation MR appears.
+# Requires: gitlab_url, gitlab_token|gitlab_pat, opencode_gitlab_path
+# Optional: mr_poll_retries (default 90), mr_poll_delay (default 10s)
+# Sets: merge_request_iid, project_id, source_branch, target_branch, repository_git_url
+
+- name: Resolve GitLab project for MR poll
+  ansible.builtin.uri:
+    url: "{{ gitlab_url | regex_replace('/$', '') }}/api/v4/projects/{{ opencode_gitlab_path | regex_replace('/', '%2F') }}"
+    method: GET
+    headers:
+      PRIVATE-TOKEN: "{{ gitlab_token | default(gitlab_pat | default('')) }}"
+    status_code: [200]
+    validate_certs: "{{ validate_certs | default(false) }}"
+  register: _mr_project
+  no_log: true
+
+- name: Set project id for MR poll
+  ansible.builtin.set_fact:
+    project_id: "{{ _mr_project.json.id | int }}"
+    repository_git_url: >-
+      {{
+        opencode_repo_url
+        | default(
+          (gitlab_url | regex_replace('/$', '')) ~ '/' ~ opencode_gitlab_path ~ '.git'
+        )
+      }}
+
+- name: Poll GitLab for remediation MR (update-artifact-* branch)
+  ansible.builtin.uri:
+    url: "{{ gitlab_url | regex_replace('/$', '') }}/api/v4/projects/{{ project_id }}/merge_requests?state=opened&order_by=updated_at&sort=desc&per_page=30"
+    method: GET
+    headers:
+      PRIVATE-TOKEN: "{{ gitlab_token | default(gitlab_pat | default('')) }}"
+    status_code: [200]
+    validate_certs: "{{ validate_certs | default(false) }}"
+  register: _mr_list
+  until: >-
+    (
+      (_mr_list.json | default([]))
+      | selectattr('source_branch', 'defined')
+      | map(attribute='source_branch')
+      | select('match', '^update-artifact-')
+      | list
+      | length
+    ) > 0
+  retries: "{{ mr_poll_retries | default(90) | int }}"
+  delay: "{{ mr_poll_delay | default(10) | int }}"
+  no_log: true
+
+- name: Pick newest matching MR
+  ansible.builtin.set_fact:
+    _matched_mrs: >-
+      {{
+        (_mr_list.json | default([]))
+        | selectattr('source_branch', 'defined')
+        | selectattr('source_branch', 'match', '^update-artifact-')
+        | list
+      }}
+
+- name: Export MR coordinates
+  ansible.builtin.set_fact:
+    merge_request_iid: "{{ _matched_mrs[0].iid | int }}"
+    source_branch: "{{ _matched_mrs[0].source_branch }}"
+    target_branch: "{{ _matched_mrs[0].target_branch | default('main') }}"
+    merge_request_url: "{{ _matched_mrs[0].web_url | default('') }}"
+    mr_draft: "{{ _matched_mrs[0].draft | default(_matched_mrs[0].work_in_progress | default(true)) }}"
+
+- name: Show found MR
+  ansible.builtin.debug:
+    msg: >-
+      Found MR !{{ merge_request_iid }} on {{ opencode_gitlab_path }}
+      ({{ source_branch }} → {{ target_branch }}, draft={{ mr_draft }})

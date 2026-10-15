@@ -1,5 +1,5 @@
 ---
-- name: Trigger OpenCode impact-analyzer (draft MR)
+- name: Trigger OpenCode impact-analyzer (draft MR) and wait for GitLab MR
   hosts: localhost
   gather_facts: false
   vars:
@@ -10,7 +10,6 @@
     - name: Normalize blast radius / single-app iteration input
       ansible.builtin.set_fact:
         blast_count: "{{ (blast_radius.count | default(affected_repos | default([]) | length)) | int }}"
-        # AO for-each passes one app as loop item → map to affected_repos[0]
         _iter_repos: >-
           {{
             affected_repos
@@ -26,6 +25,14 @@
       ansible.builtin.debug:
         msg: "Skipping impact-analyzer: no affected_repos/app_item"
       when: (_iter_repos | length) < 1
+
+    - name: Require GitLab token for MR poll
+      ansible.builtin.assert:
+        that:
+          - (gitlab_url | default('') | length) > 0
+          - (gitlab_token | default(gitlab_pat | default('')) | length) > 0
+        fail_msg: "gitlab_url and gitlab_token (or gitlab_pat) required to poll for the draft MR"
+      when: (_iter_repos | length) >= 1
 
     - name: Map package_info and target repo to skill input
       ansible.builtin.set_fact:
@@ -57,11 +64,33 @@
           draft_mr: true
       when: (_iter_repos | length) >= 1
 
-    - name: Invoke OpenCode impact-analyzer (async start; MR created by agent)
+    - name: Start OpenCode impact-analyzer (async)
       ansible.builtin.import_tasks: tasks/opencode-prompt-async.yml
       when: (_iter_repos | length) >= 1
 
-    - name: Export impact artifacts for AO loop
+    - name: Wait for OpenCode session to go idle (best-effort)
+      ansible.builtin.uri:
+        url: "{{ opencode_base_url }}/session/{{ opencode_session_id }}"
+        method: GET
+        headers:
+          Authorization: "Basic {{ opencode_basic_auth_b64 }}"
+        status_code: [200]
+        validate_certs: "{{ validate_certs | default(false) }}"
+      register: oc_idle_poll
+      until: >-
+        (oc_idle_poll.json.status | default(oc_idle_poll.json.session.status | default(''))) in
+        ['idle', 'complete', 'completed', 'done', 'error', 'failed']
+        or (oc_idle_poll.json.time | default({})).completed is defined
+      retries: "{{ opencode_sync_retries | default(60) | int }}"
+      delay: "{{ opencode_sync_delay | default(10) | int }}"
+      failed_when: false
+      when: (_iter_repos | length) >= 1 and (opencode_session_id | default('') | length) > 0
+
+    - name: Poll GitLab until draft remediation MR exists
+      ansible.builtin.import_tasks: tasks/poll-gitlab-mr.yml
+      when: (_iter_repos | length) >= 1
+
+    - name: Export impact artifacts for AO loop (incl. MR coordinates)
       ansible.builtin.set_stats:
         data:
           gitlab_path: "{{ opencode_gitlab_path | default('') }}"
@@ -70,9 +99,11 @@
           draft_mr: true
           snow_incident: "{{ snow_incident | default('') }}"
           package_info: "{{ package_info | default({}) }}"
-          # Verifier/merge still need MR iid — agent/OpenCode posts MR; resume path
-          # or a follow-up lookup may fill these. Placeholder zeros until poll exists.
-          merge_request_iid: "{{ merge_request_iid | default(0) }}"
-          project_id: "{{ project_id | default(0) }}"
+          merge_request_iid: "{{ merge_request_iid | int }}"
+          project_id: "{{ project_id | int }}"
+          source_branch: "{{ source_branch | default('') }}"
+          target_branch: "{{ target_branch | default('main') }}"
+          repository_git_url: "{{ repository_git_url | default('') }}"
+          merge_request_url: "{{ merge_request_url | default('') }}"
         per_host: false
       when: (_iter_repos | length) >= 1
