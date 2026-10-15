@@ -5,7 +5,8 @@
   gather_facts: false
   vars:
     snow_base: "{{ snow_svc_url | default(snow_url | default(''), true) }}"
-    snow_final_state: "{{ snow_final_state | default('Resolved') }}"
+    # Do not self-assign snow_final_state (recursive Jinja). Resolve once.
+    _snow_final_state: "{{ snow_final_state | default('Resolved') }}"
 
   tasks:
     - name: Require incident
@@ -42,7 +43,7 @@
         method: PATCH
         body_format: json
         body:
-          state: "{{ snow_final_state }}"
+          state: "{{ _snow_final_state }}"
           resolution_code: "{{ snow_resolution_code | default('Solved (Permanently)') }}"
           resolution_notes: "{{ _final_body }}"
           resolved_by: "{{ snow_created_by | default('Lightwell AO') }}"
@@ -54,5 +55,5 @@
       ansible.builtin.set_stats:
         data:
           snow_incident: "{{ snow_incident }}"
-          snow_final_state: "{{ snow_final_state }}"
+          snow_final_state: "{{ _snow_final_state }}"
         per_host: false
