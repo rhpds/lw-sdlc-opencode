@@ -34,7 +34,9 @@
     - name: Set project id from lookup
       ansible.builtin.set_fact:
         _project_id: "{{ _proj.json.id }}"
-      when: _proj is defined and _proj is succeeded
+      # Skipped uri registers still count as "succeeded" in Ansible — do not
+      # key off is succeeded or we template _proj.json on a skip and fail.
+      when: (project_id | default(0) | int) < 1
 
     - name: Undraft MR
       ansible.builtin.uri:
