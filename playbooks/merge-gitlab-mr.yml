@@ -1,5 +1,12 @@
 ---
-# Undraft + merge a verified GitLab MR (auto path or post-AO-Approval).
+# Merge a verified GitLab MR after AO auto-approval or human Approval.
+#
+# Policy (approval already happened upstream in AO):
+#   - state=merged  → success (idempotent)
+#   - open + draft/WIP → undraft, then merge
+#   - open + not draft → merge immediately (do NOT PUT draft=false — GitLab
+#     17.4 returns 400 when the MR is already ready)
+#   - otherwise → fail
 - name: Merge GitLab merge request
   hosts: localhost
   gather_facts: false
@@ -14,7 +21,7 @@
           - (project_id | default(0) | int) > 0 or (gitlab_path | default('') | length) > 0
         fail_msg: "gitlab_url, token, merge_request_iid, and project_id/gitlab_path required"
 
-    - name: Resolve project id
+    - name: Resolve project id from extra_vars
       ansible.builtin.set_fact:
         _project_id: "{{ project_id }}"
       when: (project_id | default(0) | int) > 0
@@ -34,11 +41,48 @@
     - name: Set project id from lookup
       ansible.builtin.set_fact:
         _project_id: "{{ _proj.json.id }}"
-      # Skipped uri registers still count as "succeeded" in Ansible — do not
-      # key off is succeeded or we template _proj.json on a skip and fail.
       when: (project_id | default(0) | int) < 1
 
-    - name: Undraft MR
+    - name: Fetch MR state
+      ansible.builtin.uri:
+        url: "{{ gitlab_url | regex_replace('/$', '') }}/api/v4/projects/{{ _project_id }}/merge_requests/{{ merge_request_iid }}"
+        method: GET
+        headers:
+          PRIVATE-TOKEN: "{{ gitlab_token | default(gitlab_pat) }}"
+        status_code: [200]
+        validate_certs: "{{ validate_certs | default(false) }}"
+      register: _mr
+
+    - name: Derive MR flags
+      ansible.builtin.set_fact:
+        _mr_state: "{{ _mr.json.state | default('') }}"
+        _mr_is_draft: >-
+          {{
+            (_mr.json.draft | default(false) | bool)
+            or (_mr.json.work_in_progress | default(false) | bool)
+            or ((_mr.json.title | default('')) is match('(?i)^(Draft:|WIP:)\\s*'))
+          }}
+        _already_merged: "{{ (_mr.json.state | default('')) == 'merged' }}"
+
+    - name: Show MR readiness
+      ansible.builtin.debug:
+        msg: >-
+          MR !{{ merge_request_iid }} state={{ _mr_state }}
+          draft={{ _mr_is_draft }}
+          merge_status={{ _mr.json.detailed_merge_status | default(_mr.json.merge_status) }}
+          action={{
+            'noop(already merged)' if (_already_merged | bool)
+            else ('undraft+merge' if (_mr_is_draft | bool) else 'merge (open, not draft)')
+          }}
+
+    - name: Fail when MR is not open and not merged
+      ansible.builtin.fail:
+        msg: "MR !{{ merge_request_iid }} is '{{ _mr_state }}' — expected opened or merged"
+      when:
+        - not (_already_merged | bool)
+        - _mr_state != 'opened'
+
+    - name: Undraft only when MR is still draft/WIP
       ansible.builtin.uri:
         url: "{{ gitlab_url | regex_replace('/$', '') }}/api/v4/projects/{{ _project_id }}/merge_requests/{{ merge_request_iid }}"
         method: PUT
@@ -48,11 +92,14 @@
         body_format: json
         body:
           draft: false
+          title: "{{ _mr.json.title | regex_replace('^(?i)(Draft:|WIP:)\\s*', '') }}"
         status_code: [200]
         validate_certs: "{{ validate_certs | default(false) }}"
-      no_log: true
+      when:
+        - not (_already_merged | bool)
+        - _mr_is_draft | bool
 
-    - name: Merge MR
+    - name: Merge open MR (approval already granted in AO)
       ansible.builtin.uri:
         url: "{{ gitlab_url | regex_replace('/$', '') }}/api/v4/projects/{{ _project_id }}/merge_requests/{{ merge_request_iid }}/merge"
         method: PUT
@@ -66,7 +113,7 @@
         status_code: [200, 201]
         validate_certs: "{{ validate_certs | default(false) }}"
       register: mr_merge
-      no_log: true
+      when: not (_already_merged | bool)
 
     - name: Export merge artifacts
       ansible.builtin.set_stats:
