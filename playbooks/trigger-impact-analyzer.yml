@@ -49,6 +49,18 @@
         app_approval: "{{ _iter_repos[0].approval | default('needs_approval') }}"
       when: (_iter_repos | length) >= 1
 
+    # app_risk_metadata arrives from the activation extra_vars as a JSON
+    # *string* (it is rendered by the chart into a ConfigMap value), so parse
+    # it before use. Tolerate a dict too, in case a caller passes one directly.
+    - name: Resolve risk metadata for the target app
+      vars:
+        _risk_all: >-
+          {{ app_risk_metadata if (app_risk_metadata | default('') is mapping)
+             else (app_risk_metadata | default('{}') | from_json) }}
+      ansible.builtin.set_fact:
+        _app_risk: "{{ _risk_all.get(opencode_gitlab_path.split('/')[-1], {}) }}"
+      when: (_iter_repos | length) >= 1
+
     - name: Build OpenCode skill input (draft MR)
       ansible.builtin.set_fact:
         opencode_input:
@@ -68,10 +80,10 @@
           # per-repo value wins when TPA already carried one.
           risk_class: >-
             {{ _iter_repos[0].risk_class
-               | default((app_risk_metadata | default({})).get(opencode_gitlab_path.split('/')[-1], {}).get('riskClass', 'MEDIUM'), true) }}
+               | default(_app_risk.get('riskClass', 'MEDIUM'), true) }}
           risk_rationale: >-
             {{ _iter_repos[0].risk_rationale
-               | default((app_risk_metadata | default({})).get(opencode_gitlab_path.split('/')[-1], {}).get('riskRationale', ''), true) }}
+               | default(_app_risk.get('riskRationale', ''), true) }}
       when: (_iter_repos | length) >= 1
 
     - name: Start OpenCode impact-analyzer (async)
