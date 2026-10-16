@@ -26,12 +26,12 @@
         msg: "Skipping impact-analyzer: no affected_repos/app_item"
       when: (_iter_repos | length) < 1
 
-    - name: Require GitLab token for MR poll
+    - name: Require GitLab token for MR poll / pom check
       ansible.builtin.assert:
         that:
           - (gitlab_url | default('') | length) > 0
           - (gitlab_token | default(gitlab_pat | default('')) | length) > 0
-        fail_msg: "gitlab_url and gitlab_token (or gitlab_pat) required to poll for the draft MR"
+        fail_msg: "gitlab_url and gitlab_token (or gitlab_pat) required for impact outcome detection"
       when: (_iter_repos | length) >= 1
 
     - name: Map package_info and target repo to skill input
@@ -74,24 +74,78 @@
       ansible.builtin.import_tasks: tasks/opencode-wait-idle.yml
       when: (_iter_repos | length) >= 1 and (opencode_session_id | default('') | length) > 0
 
+    - name: Detect already-current vs needs MR
+      ansible.builtin.import_tasks: tasks/detect-impact-outcome.yml
+      when: (_iter_repos | length) >= 1 and (opencode_session_id | default('') | length) > 0
+
     - name: Poll GitLab until draft remediation MR exists
       ansible.builtin.import_tasks: tasks/poll-gitlab-mr.yml
-      when: (_iter_repos | length) >= 1
+      when:
+        - (_iter_repos | length) >= 1
+        - not (impact_already_current | default(false) | bool)
 
-    - name: Export impact artifacts for AO loop (incl. MR coordinates)
+    - name: Mark iteration as MR opened
+      ansible.builtin.set_fact:
+        iteration_outcome: mr_opened
+        remediation_needed: true
+      when:
+        - (_iter_repos | length) >= 1
+        - not (impact_already_current | default(false) | bool)
+
+    - name: Defaults when already current (no MR)
+      ansible.builtin.set_fact:
+        iteration_outcome: already_current
+        remediation_needed: false
+        draft_mr: false
+        merge_request_iid: 0
+        project_id: "{{ project_id | default(0) }}"
+        source_branch: ""
+        target_branch: "{{ gitlab_default_branch | default('main') }}"
+        merge_request_url: ""
+        repository_git_url: "{{ opencode_repo_url | default('') }}"
+      when:
+        - (_iter_repos | length) >= 1
+        - impact_already_current | default(false) | bool
+
+    - name: Resolve GitLab project id when already current
+      ansible.builtin.uri:
+        url: "{{ gitlab_url | regex_replace('/$', '') }}/api/v4/projects/{{ opencode_gitlab_path | regex_replace('/', '%2F') }}"
+        method: GET
+        headers:
+          PRIVATE-TOKEN: "{{ gitlab_token | default(gitlab_pat | default('')) }}"
+        status_code: [200]
+        validate_certs: "{{ validate_certs | default(false) }}"
+      register: _already_project
+      no_log: true
+      when:
+        - (_iter_repos | length) >= 1
+        - impact_already_current | default(false) | bool
+
+    - name: Set project id for already-current path
+      ansible.builtin.set_fact:
+        project_id: "{{ _already_project.json.id | int }}"
+      when:
+        - (_iter_repos | length) >= 1
+        - impact_already_current | default(false) | bool
+        - _already_project is defined
+        - (_already_project.status | default(0) | int) == 200
+
+    - name: Export impact artifacts for AO loop
       ansible.builtin.set_stats:
         data:
           gitlab_path: "{{ opencode_gitlab_path | default('') }}"
           approval: "{{ app_approval | default('needs_approval') }}"
           opencode_session_id: "{{ opencode_session_id | default('') }}"
-          draft_mr: true
+          draft_mr: "{{ false if (impact_already_current | default(false) | bool) else true }}"
+          remediation_needed: "{{ not (impact_already_current | default(false) | bool) }}"
+          iteration_outcome: "{{ iteration_outcome | default('mr_opened') }}"
           snow_incident: "{{ snow_incident | default('') }}"
           package_info: "{{ package_info | default({}) }}"
-          merge_request_iid: "{{ merge_request_iid | int }}"
-          project_id: "{{ project_id | int }}"
+          merge_request_iid: "{{ merge_request_iid | default(0) | int }}"
+          project_id: "{{ project_id | default(0) | int }}"
           source_branch: "{{ source_branch | default('') }}"
           target_branch: "{{ target_branch | default('main') }}"
-          repository_git_url: "{{ repository_git_url | default('') }}"
+          repository_git_url: "{{ repository_git_url | default(opencode_repo_url | default('')) }}"
           merge_request_url: "{{ merge_request_url | default('') }}"
         per_host: false
       when: (_iter_repos | length) >= 1

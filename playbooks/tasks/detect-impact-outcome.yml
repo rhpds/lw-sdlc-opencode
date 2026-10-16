@@ -1,0 +1,87 @@
+---
+# After impact-analyzer is idle, decide whether an MR was opened or the app
+# is already on the fix version. Prefer OpenCode's own wording; fall back to
+# a default-branch pom check so we never burn 90× MR polls on a no-op.
+#
+# Requires: opencode_base_url, opencode_session_id, opencode_basic_auth_b64,
+#           gitlab_url, gitlab_token|gitlab_pat, opencode_gitlab_path, package_info
+# Sets: impact_already_current, iteration_outcome (already_current|pending_mr)
+
+- name: Fetch OpenCode session messages
+  ansible.builtin.uri:
+    url: "{{ opencode_base_url }}/session/{{ opencode_session_id }}/message"
+    method: GET
+    headers:
+      Authorization: "Basic {{ opencode_basic_auth_b64 }}"
+    status_code: [200]
+    validate_certs: "{{ validate_certs | default(false) }}"
+    return_content: true
+  register: _impact_messages
+  failed_when: false
+
+- name: Detect already-current from agent text
+  ansible.builtin.set_fact:
+    _agent_says_current: >-
+      {{
+        (
+          (_impact_messages.content | default(''))
+          ~ ' '
+          ~ (_impact_messages.json | default({}) | to_json)
+        )
+        | lower
+        is search(
+          'already current|already using|no update was needed|remediation not required|no merge request was created|version already current'
+        )
+      }}
+
+- name: Resolve fix version / artifactId for pom check
+  ansible.builtin.set_fact:
+    _fix_version: >-
+      {{
+        package_info.fix_version
+        | default(package_info.new_version | default(''))
+      }}
+    _dep_artifact: >-
+      {{
+        (package_info.artifact_id | default('') | split(':') | last)
+        if (package_info.artifact_id | default('') | length) > 0
+        else (package_info.purl | default('') | regex_replace('^pkg:maven/[^/]+/', '') | regex_replace('@.*$', ''))
+      }}
+
+- name: Fetch default-branch pom.xml
+  ansible.builtin.uri:
+    url: "{{ gitlab_url | regex_replace('/$', '') }}/api/v4/projects/{{ opencode_gitlab_path | regex_replace('/', '%2F') }}/repository/files/pom.xml/raw?ref={{ gitlab_default_branch | default('main') }}"
+    method: GET
+    headers:
+      PRIVATE-TOKEN: "{{ gitlab_token | default(gitlab_pat | default('')) }}"
+    status_code: [200, 404]
+    validate_certs: "{{ validate_certs | default(false) }}"
+    return_content: true
+  register: _impact_pom
+  failed_when: false
+  no_log: true
+
+- name: Detect already-current from pom.xml
+  ansible.builtin.set_fact:
+    _pom_already_current: >-
+      {{
+        (_impact_pom.status | default(0) | int) == 200
+        and (_fix_version | default('') | length) > 0
+        and (_dep_artifact | default('') | length) > 0
+        and (_fix_version in (_impact_pom.content | default('')))
+        and ('<artifactId>' ~ _dep_artifact ~ '</artifactId>' in (_impact_pom.content | default('')))
+      }}
+
+- name: Set impact already-current flag
+  ansible.builtin.set_fact:
+    impact_already_current: "{{ (_agent_says_current | bool) or (_pom_already_current | bool) }}"
+    iteration_outcome: "{{ 'already_current' if ((_agent_says_current | bool) or (_pom_already_current | bool)) else 'pending_mr' }}"
+
+- name: Show impact outcome detection
+  ansible.builtin.debug:
+    msg: >-
+      impact outcome={{ iteration_outcome }}
+      agent_says_current={{ _agent_says_current }}
+      pom_already_current={{ _pom_already_current }}
+      fix={{ _fix_version }} artifact={{ _dep_artifact }}
+      path={{ opencode_gitlab_path }}
