@@ -273,7 +273,43 @@ oc run smoke-mr-<merge_request_iid> --rm -i --restart=Never \
 
 For demo depth **A**, `/api/status` returns one row per tracked library. The bump under test is verified when the row for the remediated `artifact_id` reports the new `.rhlw-` version in `lightwellFix` with `"loaded": true`. Capture pass/fail and a short response snippet (no secrets) — do not paste the whole payload into the MR note.
 
-## Step 5 — Summarize on MR
+## Step 5 — Fill the Automated Validation table
+
+The MR body created by `bump-maven-mr` carries an **Automated Validation**
+table with every row Pending. You own those rows: replace them with what the
+verify Job and smoke tests actually produced.
+
+```bash
+python3 /app/scripts/gitlab_api.py mr-validation --project-id <id> --iid <iid> --results '{
+  "signature":          {"status": "passed", "details": "Signed by Red Hat Lightwell (SHA-256)"},
+  "sbom_integrity":     {"status": "passed", "details": "CycloneDX SBOM matches binary contents"},
+  "unit_tests":         {"status": "passed", "details": "43/43 tests passed (0 failures, 0 skipped)"},
+  "integration_tests":  {"status": "passed", "details": "9/9 API contract tests passed"},
+  "dependency_compat":  {"status": "passed", "details": "No breaking API changes detected"},
+  "regression":         {"status": "passed", "details": "Behavioral diff: 0 changes detected"},
+  "license":            {"status": "passed", "details": "Apache-2.0 (unchanged)"}
+}'
+```
+
+Rules, in order of importance:
+
+1. **Report only what you measured.** Take test counts from the Surefire/Failsafe
+   output in the Job log, not from memory and not from this example. If the Job
+   did not run a check, leave that key out — it stays Pending, which is honest.
+   A fabricated ✅ is the worst possible outcome here, because the whole point
+   of the table is that a human can trust it.
+2. `status` is one of `passed`, `failed`, `pending`, `skipped`, `warning`.
+3. On any failure use `"status": "failed"` with the real reason. The command
+   rewrites **Recommended Action** to "Do not merge" by itself — do not also
+   edit the description by hand.
+4. Only pass `--ready` (which drops the `Draft:` prefix) when every check
+   passed *and* the risk class does not require human review. On the AO path
+   leave the MR as draft; AO handles merging.
+5. The command rewrites only the marked block, so the Summary and Vulnerability
+   Details written at creation time are preserved. Never use `mr-update` to
+   replace the whole description.
+
+## Step 6 — Summarize on MR
 
 ```bash
 python3 /app/scripts/gitlab_api.py mr-note --project-id <id> --mr-iid <iid> --body "<markdown summary>"

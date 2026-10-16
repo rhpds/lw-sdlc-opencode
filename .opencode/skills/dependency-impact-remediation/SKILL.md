@@ -55,9 +55,11 @@ Environment: `GITLAB_URL`, `GITLAB_PAT` per `.opencode/reference/gitlab-credenti
    ```
 3. Process **only that one** project.
 
-## Step 2 — Draft impact analysis
+## Step 2 — Draft risk assessment
 
-Write a short **Impact Analysis** paragraph (CVE / remediating version / single-app demo A). Keep it factual; you will pass it as `--impact-text`.
+Write a short **Risk Assessment** paragraph: why this application is or is not
+affected, and whether human review is required and why. Keep it factual; you
+pass it as `--impact-text`.
 
 ## Step 3 — Bump + MR (preferred one-shot)
 
@@ -68,8 +70,29 @@ python3 /app/scripts/gitlab_api.py bump-maven-mr \
   --path "<gitlab_path>" \
   --artifact-id "<artifact_id>" \
   --new-version "<new_version>" \
-  --impact-text "<your Impact Analysis paragraph>"
+  --impact-text "<your Risk Assessment paragraph>" \
+  --cve-id "<package_info.cve_id>" \
+  --cve-title "<package_info.cve_title>" \
+  --cve-description "<package_info.cve_description>" \
+  --cvss-score "<package_info.cvss_score>" \
+  --risk-class "<risk_class>" \
+  --risk-rationale "<risk_rationale>" \
+  --transitive-count 0
 ```
+
+Pass every advisory field the session input gives you — they populate the MR
+Summary table. Omit a flag only when the input genuinely lacks it; the CLI then
+renders "not scored" / "not referenced". **Do not invent a CVE, a CVSS score or
+a risk class.** An MR that overstates what is known is worse than one that
+admits a gap.
+
+`--transitive-count` is the number of *transitive* dependency changes the bump
+causes — 0 for a straight version bump in `<dependencies>`. Only raise it if you
+actually inspected the resolved tree.
+
+The CLI writes the **Automated Validation** table with every row Pending. Do not
+try to fill it in: the MR Verifier owns those results and rewrites that block
+once the verify Job has really run.
 
 Default: open a **draft** MR (`--draft`; use `--no-draft` only if explicitly required). AO merges after Verifier (+ Approval when policy says `needs_approval`).
 
