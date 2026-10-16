@@ -53,7 +53,13 @@
               opencode_base_url: "{{ opencode_base_url }}"
               opencode_server_username: "{{ opencode_server_username | default('opencode') }}"
               opencode_server_password: "{{ opencode_server_password }}"
-              blast_radius_mode: single_app_demo_a
+              # Must be listed — EDA job_args replace activation extra_vars rather than
+              # merging them. Omitting snow_* left Create SNOW with empty URLs (cng2l).
+              snow_url: "{{ snow_url | default('') }}"
+              snow_svc_url: "{{ snow_svc_url | default('') }}"
+              gitlab_token: "{{ gitlab_token | default('') }}"
+              tpa_oauth_client_secret: "{{ tpa_oauth_client_secret | default('') }}"
+              blast_radius_mode: "{{ blast_radius_mode | default('tpa_affected_repos') }}"
               aap_organization_name: "{{ aap_organization_name }}"
               ao_base_url: "{{ ao_base_url }}"
               ao_client_id: "{{ ao_client_id }}"
