@@ -39,6 +39,50 @@
         resolved_new_version: "{{ artifact_version | default(fix_version | default('')) }}"
         resolved_gitlab_path: "{{ remediation_gitlab_path }}"
 
+    # A plain Nexus component event carries no CVE, so cve_id arrives as
+    # "unknown" and the MR body would have nothing to show. publish-remediation.sh
+    # uploads an OSV advisory per CVE with aliases/severity/details, so look the
+    # advisory up by coordinate and use it to fill the MR Summary. Best effort:
+    # the bump must still happen when TPA has no advisory for this package.
+    - name: Query TPA vulnerabilities for this artifact
+      ansible.builtin.uri:
+        url: "{{ tpa_url }}/api/v3/vulnerability?q={{ resolved_artifact_id | urlencode }}&limit=20"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ tpa_access_token }}"
+        validate_certs: "{{ validate_certs | default(false) }}"
+        status_code: [200, 401, 404]
+      register: tpa_vuln_query
+      when: tpa_access_token is defined
+      ignore_errors: true
+
+    - name: Default advisory facts
+      ansible.builtin.set_fact:
+        tpa_vuln_items: []
+        resolved_cve_id: "{{ cve_id | default('unknown') }}"
+        resolved_cve_title: ""
+        resolved_cve_description: ""
+        resolved_cvss_score: ""
+
+    - name: Set vulnerability items from API response
+      ansible.builtin.set_fact:
+        tpa_vuln_items: "{{ tpa_vuln_query.json['items'] | default([]) }}"
+      when: tpa_vuln_query is succeeded and (tpa_vuln_query.status | default(0)) == 200
+
+    # Prefer a CVE the caller already named; otherwise take the first CVE TPA
+    # knows about for this coordinate.
+    - name: Select the advisory to describe
+      vars:
+        _cves: "{{ tpa_vuln_items | selectattr('identifier', 'defined') | selectattr('identifier', 'match', '^CVE-') | list }}"
+        _named: "{{ tpa_vuln_items | selectattr('identifier', 'defined') | selectattr('identifier', 'equalto', cve_id | default('')) | list }}"
+        _pick: "{{ (_named | first) if (_named | length > 0) else ((_cves | first) if (_cves | length > 0) else {}) }}"
+      ansible.builtin.set_fact:
+        resolved_cve_id: "{{ _pick.identifier | default(cve_id | default('unknown'), true) }}"
+        resolved_cve_title: "{{ _pick.title | default(_pick.summary | default('')) }}"
+        resolved_cve_description: "{{ _pick.description | default(_pick.details | default('')) }}"
+        resolved_cvss_score: "{{ _pick.average_severity | default(severity | default('')) | title }}"
+      when: tpa_vuln_items | length > 0
+
     - name: Build package_info
       ansible.builtin.set_fact:
         package_info:
@@ -47,7 +91,10 @@
           vulnerable_version: "{{ vulnerable_version | default('') }}"
           fix_version: "{{ resolved_new_version }}"
           new_version: "{{ resolved_new_version }}"
-          cve_id: "{{ cve_id | default('unknown') }}"
+          cve_id: "{{ resolved_cve_id }}"
+          cve_title: "{{ resolved_cve_title }}"
+          cve_description: "{{ resolved_cve_description }}"
+          cvss_score: "{{ resolved_cvss_score }}"
 
     # Demo A: labeled SBOM present ⇒ one affected app (help-app). No SBOM ⇒ count 0.
     - name: Build blast radius — match (single app)
