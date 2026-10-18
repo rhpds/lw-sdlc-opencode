@@ -52,13 +52,31 @@
     # app_risk_metadata arrives from the activation extra_vars as a JSON
     # *string* (it is rendered by the chart into a ConfigMap value), so parse
     # it before use. Tolerate a dict too, in case a caller passes one directly.
-    - name: Resolve risk metadata for the target app
-      vars:
-        _risk_all: >-
-          {{ app_risk_metadata if (app_risk_metadata | default('') is mapping)
-             else (app_risk_metadata | default('{}') | from_json) }}
+    # Parse first, in its own task: app_risk_metadata arrives from the
+    # activation extra_vars as a JSON *string*, but a caller may pass a dict.
+    # Doing the decode inline in a vars: block silently produced an empty map.
+    - name: Decode app risk metadata
       ansible.builtin.set_fact:
-        _app_risk: "{{ _risk_all.get(opencode_gitlab_path.split('/')[-1], {}) }}"
+        _risk_all: >-
+          {{ (app_risk_metadata | from_json)
+             if (app_risk_metadata | default('') is string and (app_risk_metadata | default('') | length) > 0)
+             else (app_risk_metadata | default({})) }}
+      when: (_iter_repos | length) >= 1
+
+    - name: Resolve risk metadata for the target app
+      ansible.builtin.set_fact:
+        _app_key: "{{ opencode_gitlab_path.split('/') | last }}"
+        _app_risk: "{{ (_risk_all | default({}))[opencode_gitlab_path.split('/') | last] | default({}) }}"
+      when: (_iter_repos | length) >= 1
+
+    # Without this, an unmatched key is indistinguishable from an unclassified
+    # app: both silently yield MEDIUM, which is what happened on cd2fp.
+    - name: Report the risk lookup
+      ansible.builtin.debug:
+        msg: >-
+          risk lookup key={{ _app_key | default('?') }}
+          known={{ (_risk_all | default({})).keys() | list }}
+          resolved={{ _app_risk | default({}) }}
       when: (_iter_repos | length) >= 1
 
     - name: Build OpenCode skill input (draft MR)
