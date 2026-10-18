@@ -49,34 +49,20 @@
         app_approval: "{{ _iter_repos[0].approval | default('needs_approval') }}"
       when: (_iter_repos | length) >= 1
 
-    # app_risk_metadata arrives from the activation extra_vars as a JSON
-    # *string* (it is rendered by the chart into a ConfigMap value), so parse
-    # it before use. Tolerate a dict too, in case a caller passes one directly.
-    # Parse first, in its own task: app_risk_metadata arrives from the
-    # activation extra_vars as a JSON *string*, but a caller may pass a dict.
-    # Doing the decode inline in a vars: block silently produced an empty map.
-    - name: Decode app risk metadata
-      ansible.builtin.set_fact:
-        _risk_all: >-
-          {{ (app_risk_metadata | from_json)
-             if (app_risk_metadata | default('') is string and (app_risk_metadata | default('') | length) > 0)
-             else (app_risk_metadata | default({})) }}
-      when: (_iter_repos | length) >= 1
-
+    # Risk classification travels in .lightwell/policy.json, which classify
+    # carries into affected_repos as .policy. The EDA activation's extra_vars
+    # are NOT a usable channel here: AO launches this job template with its
+    # own payload, so anything set only on the activation never arrives.
     - name: Resolve risk metadata for the target app
       ansible.builtin.set_fact:
-        _app_key: "{{ opencode_gitlab_path.split('/') | last }}"
-        _app_risk: "{{ (_risk_all | default({}))[opencode_gitlab_path.split('/') | last] | default({}) }}"
+        _app_policy: "{{ _iter_repos[0].policy | default({}) }}"
       when: (_iter_repos | length) >= 1
 
-    # Without this, an unmatched key is indistinguishable from an unclassified
-    # app: both silently yield MEDIUM, which is what happened on cd2fp.
     - name: Report the risk lookup
       ansible.builtin.debug:
         msg: >-
-          risk lookup key={{ _app_key | default('?') }}
-          known={{ (_risk_all | default({})).keys() | list }}
-          resolved={{ _app_risk | default({}) }}
+          risk app={{ opencode_gitlab_path.split('/') | last }}
+          policy={{ _app_policy | default({}) }}
       when: (_iter_repos | length) >= 1
 
     - name: Build OpenCode skill input (draft MR)
@@ -92,16 +78,10 @@
           match_reason: "{{ _iter_repos[0].match_reason | default('') }}"
           blast_radius: "{{ blast_radius | default({'mode': 'multi_app_policy_demo', 'count': 1}) }}"
           draft_mr: true
-          # Risk classification for the app being remediated, so the MR body can
-          # state why review is or is not required. Sourced from
-          # gitlab.appSeeds in the tenant chart via app_risk_metadata; the
-          # per-repo value wins when TPA already carried one.
-          risk_class: >-
-            {{ _iter_repos[0].risk_class
-               | default(_app_risk.get('riskClass', 'MEDIUM'), true) }}
-          risk_rationale: >-
-            {{ _iter_repos[0].risk_rationale
-               | default(_app_risk.get('riskRationale', ''), true) }}
+          # Drives the Acme Inc. Risk Class row and whether the MR body
+          # demands human review. Set in gitlab.appSeeds[].policy.
+          risk_class: "{{ (_app_policy | default({})).get('riskClass', 'MEDIUM') }}"
+          risk_rationale: "{{ (_app_policy | default({})).get('riskRationale', '') }}"
       when: (_iter_repos | length) >= 1
 
     - name: Start OpenCode impact-analyzer (async)
