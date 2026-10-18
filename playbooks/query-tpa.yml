@@ -46,7 +46,9 @@
     # the bump must still happen when TPA has no advisory for this package.
     - name: Query TPA vulnerabilities for this artifact
       ansible.builtin.uri:
-        url: "{{ tpa_url }}/api/v3/vulnerability?q={{ resolved_artifact_id | urlencode }}&limit=20"
+        # Query by artifact name: TPA indexes CVEs against the artifact, so the
+        # full group:artifact coordinate matches nothing.
+        url: "{{ tpa_url }}/api/v3/vulnerability?q={{ (resolved_artifact_id.split(':') | last) | urlencode }}&limit=20"
         method: GET
         headers:
           Authorization: "Bearer {{ tpa_access_token }}"
@@ -78,9 +80,19 @@
         _pick: "{{ (_named | first) if (_named | length > 0) else ((_cves | first) if (_cves | length > 0) else {}) }}"
       ansible.builtin.set_fact:
         resolved_cve_id: "{{ _pick.identifier | default(cve_id | default('unknown'), true) }}"
-        resolved_cve_title: "{{ _pick.title | default(_pick.summary | default('')) }}"
-        resolved_cve_description: "{{ _pick.description | default(_pick.details | default('')) }}"
-        resolved_cvss_score: "{{ _pick.average_severity | default(severity | default('')) | title }}"
+        resolved_cve_title: "{{ _pick.title | default('') }}"
+        resolved_cve_description: "{{ _pick.description | default('') }}"
+        # base_score is the field TPA actually returns; render it with the
+        # usual qualitative band so the MR reads like a CVSS score.
+        resolved_cvss_score: >-
+          {{ ('%.1f (%s)' % (
+               _pick.base_score | float,
+               'Critical' if (_pick.base_score | float) >= 9.0
+               else 'High' if (_pick.base_score | float) >= 7.0
+               else 'Medium' if (_pick.base_score | float) >= 4.0
+               else 'Low'))
+             if (_pick.base_score is defined and _pick.base_score is not none)
+             else (severity | default('') | title) }}
       when: tpa_vuln_items | length > 0
 
     - name: Build package_info
