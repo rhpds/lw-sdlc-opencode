@@ -91,7 +91,8 @@
                else 'High' if (_pick.base_score | float) >= 7.0
                else 'Medium' if (_pick.base_score | float) >= 4.0
                else 'Low'))
-             if (_pick.base_score is defined and _pick.base_score is not none)
+             if (_pick.base_score is defined and _pick.base_score is not none
+                 and (_pick.base_score | float) > 0)
              else (severity | default('') | title) }}
       when: tpa_vuln_items | length > 0
 

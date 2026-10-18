@@ -433,13 +433,25 @@ def build_mr_description(
         "",
     ]
 
+    # TPA often returns title == description, and descriptions can run to
+    # several thousand characters listing every affected product. Render a
+    # short headline plus a trimmed body rather than the same wall of text
+    # twice.
+    title_txt = (cve_title or "").strip()
+    desc_txt = (cve_description or "").strip()
+    if title_txt and title_txt == desc_txt:
+        title_txt = title_txt.split(". ")[0].rstrip(".")
+    if len(title_txt) > 120:
+        title_txt = title_txt[:117].rstrip() + "..."
+    if len(desc_txt) > 700:
+        desc_txt = desc_txt[:697].rstrip() + "..."
     if cve_id and cve_id != "unknown":
         heading = f"**{cve_id}**"
-        if cve_title:
-            heading += f" — {cve_title}"
+        if title_txt:
+            heading += f" — {title_txt}"
         parts += [heading, ""]
-    if cve_description:
-        parts += [cve_description.strip(), ""]
+    if desc_txt:
+        parts += [desc_txt, ""]
     parts += [
         f"Red Hat Lightwell has backported the upstream fix directly to the `{new_version}` "
         "release line. The remediated binary is digitally signed and ships a complete SBOM "
