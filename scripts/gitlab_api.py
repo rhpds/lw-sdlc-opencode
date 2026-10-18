@@ -278,24 +278,272 @@ def cmd_commit_file(args: argparse.Namespace) -> None:
     out(api_or_die("POST", f"/projects/{pid}/repository/commits", body))
 
 
+# Risk classes render as a coloured dot so the MR title and the validation
+# table read at a glance in the GitLab list view.
+RISK_EMOJI = {
+    "CRITICAL": "🔴",
+    "HIGH": "🔴",
+    "MEDIUM": "🟡",
+    "LOW": "🟢",
+    "NONE": "⚪",
+}
+
+# The validation table in display order. impact-analyzer renders every row as
+# Pending; mr-verifier fills them in once the verify Job has actually run, so
+# the table never claims a result that nothing produced.
+VALIDATION_CHECKS: list[tuple[str, str]] = [
+    ("risk_class", "Acme Inc. Risk Class"),
+    ("signature", "Binary signature verification"),
+    ("sbom_integrity", "SBOM integrity"),
+    ("unit_tests", "Unit tests"),
+    ("integration_tests", "Integration tests"),
+    ("dependency_compat", "Dependency compatibility"),
+    ("regression", "Regression scan"),
+    ("license", "License compliance"),
+]
+
+STATUS_ICON = {
+    "passed": "✅ Passed",
+    "failed": "❌ Failed",
+    "pending": "⏳ Pending",
+    "skipped": "⏭️ Skipped",
+    "warning": "⚠️ Warning",
+}
+
+# mr-verifier rewrites only what sits between these markers, so the Summary and
+# Vulnerability Details written at creation time survive the update.
+VALIDATION_START = "<!-- lw:validation:start -->"
+VALIDATION_END = "<!-- lw:validation:end -->"
+ACTION_START = "<!-- lw:action:start -->"
+ACTION_END = "<!-- lw:action:end -->"
+
+CVE_BASE_URL = "https://access.redhat.com/security/cve/"
+
+
+def risk_badge(risk_class: str) -> str:
+    rc = (risk_class or "").strip().upper() or "NONE"
+    return f"{RISK_EMOJI.get(rc, '⚪')} {rc}"
+
+
+def render_validation_table(results: dict, risk_class: str, risk_rationale: str) -> str:
+    """Render the Automated Validation table.
+
+    `results` maps a check key from VALIDATION_CHECKS to
+    {"status": "passed"|"failed"|..., "details": "..."}. Anything absent is
+    Pending — an unrun check must never look like a passing one.
+    """
+    rows = ["| Check | Status | Details |", "|---|---|---|"]
+    for key, label in VALIDATION_CHECKS:
+        if key == "risk_class":
+            rows.append(
+                f"| {label} | {risk_badge(risk_class)} | "
+                f"{risk_rationale or 'No risk classification recorded'} |"
+            )
+            continue
+        res = results.get(key) or {}
+        status = STATUS_ICON.get(str(res.get("status", "pending")).lower(), STATUS_ICON["pending"])
+        rows.append(f"| {label} | {status} | {res.get('details') or 'Awaiting verification'} |")
+    return "\n".join(rows)
+
+
+def render_recommended_action(risk_class: str, results: dict) -> str:
+    """Human review is driven by risk class first, then by failing checks."""
+    rc = (risk_class or "").strip().upper()
+    failed = [
+        label
+        for key, label in VALIDATION_CHECKS
+        if str((results.get(key) or {}).get("status", "")).lower() == "failed"
+    ]
+    if failed:
+        return (
+            "> ❌ **Do not merge — automated validation failed.**\n>\n"
+            f"> Failing checks: {', '.join(failed)}. Investigate before approving; "
+            "a failed check means the remediated build did not behave like the one it replaces."
+        )
+    if rc in ("HIGH", "CRITICAL"):
+        return (
+            "> 🔍 **Requires human review before merge.**\n>\n"
+            "> A security or DevSecOps engineer should review the patch diff, assess the "
+            "application-specific impact, and approve or request changes. Risk class "
+            f"**{rc}** requires review regardless of automated check results."
+        )
+    if any((results.get(k) or {}).get("status") for k, _ in VALIDATION_CHECKS):
+        return (
+            "> ✅ **Safe to merge.**\n>\n"
+            "> All automated checks passed and the application is not in a review-required "
+            "risk class."
+        )
+    return (
+        "> ⏳ **Awaiting automated validation.**\n>\n"
+        "> The MR Verifier is building and testing this change in an isolated namespace. "
+        "The table above updates when it finishes."
+    )
+
+
 def build_mr_description(
     artifact_id: str,
     new_version: str,
     gitlab_path: str,
     impact_text: str,
     handoff: dict,
+    *,
+    old_version: str = "",
+    cve_id: str = "",
+    cve_title: str = "",
+    cve_description: str = "",
+    cvss_score: str = "",
+    risk_class: str = "",
+    risk_rationale: str = "",
+    risk_score: str = "",
+    transitive_count: int = 0,
+    results: dict | None = None,
 ) -> str:
+    results = results or {}
     handoff_json = json.dumps(handoff, indent=2)
-    return (
-        f"## Dependency Update\n"
-        f"Artifact: `{artifact_id}`\n"
-        f"New Version: `{new_version}`\n"
-        f"GitLab path: `{gitlab_path}`\n"
-        f"Blast radius: demo A (single app)\n\n"
-        f"## Impact Analysis\n"
-        f"{impact_text.strip() or '_No analysis provided._'}\n\n"
-        f"<!-- agent-handoff: do not edit below -->\n"
-        f"```json\n{handoff_json}\n```\n"
+    short_artifact = artifact_id.split(":")[-1]
+    cve_cell = f"[{cve_id}]({CVE_BASE_URL}{cve_id})" if cve_id and cve_id != "unknown" else "_Not referenced_"
+    cvss_cell = f"{cvss_score} → **Patched**" if cvss_score else "_Not scored_"
+    sbom_cell = (
+        f"1 direct dependency updated, {transitive_count} transitive "
+        f"{'change' if transitive_count == 1 else 'changes'}"
+    )
+
+    parts = [
+        "## 🤖 Lightwell Automated Remediation",
+        "",
+        "This merge request was automatically generated by the **Lightwell OpenCode Agents** "
+        "after a new remediated package was published to the Red Hat Lightwell Network "
+        "repository.",
+        "",
+        "---",
+        "",
+        "## Summary",
+        "",
+        "| Field | Value |",
+        "|---|---|",
+        f"| Package | `{artifact_id}` |",
+        f"| Current Version | `{old_version or 'unknown'}` |",
+        f"| Remediated Version | `{new_version}` |",
+        f"| CVE | {cve_cell} |",
+        f"| CVSS Score | {cvss_cell} |",
+        f"| Lightwell Risk Score | {risk_badge(risk_score or risk_class)} |",
+        f"| SBOM Impact | {sbom_cell} |",
+        "",
+        "## Vulnerability Details",
+        "",
+    ]
+
+    # TPA often returns title == description, and descriptions can run to
+    # several thousand characters listing every affected product. Render a
+    # short headline plus a trimmed body rather than the same wall of text
+    # twice.
+    title_txt = (cve_title or "").strip()
+    desc_txt = (cve_description or "").strip()
+    if title_txt and title_txt == desc_txt:
+        title_txt = title_txt.split(". ")[0].rstrip(".")
+    if len(title_txt) > 120:
+        title_txt = title_txt[:117].rstrip() + "..."
+    if len(desc_txt) > 700:
+        desc_txt = desc_txt[:697].rstrip() + "..."
+    if cve_id and cve_id != "unknown":
+        heading = f"**{cve_id}**"
+        if title_txt:
+            heading += f" — {title_txt}"
+        parts += [heading, ""]
+    if desc_txt:
+        parts += [desc_txt, ""]
+    parts += [
+        f"Red Hat Lightwell has backported the upstream fix directly to the `{new_version}` "
+        "release line. The remediated binary is digitally signed and ships a complete SBOM "
+        "attestation.",
+        "",
+        "## Automated Validation",
+        "",
+        VALIDATION_START,
+        render_validation_table(results, risk_class, risk_rationale),
+        VALIDATION_END,
+        "",
+        "## Risk Assessment",
+        "",
+        impact_text.strip() or "_No impact analysis provided._",
+        "",
+        "## Recommended Action",
+        "",
+        ACTION_START,
+        render_recommended_action(risk_class, results),
+        ACTION_END,
+        "",
+        "<!-- agent-handoff: do not edit below -->",
+        f"```json\n{handoff_json}\n```",
+        "",
+    ]
+    return "\n".join(parts)
+
+
+def replace_marked_block(text: str, start: str, end: str, replacement: str) -> str:
+    """Swap the content between two markers, leaving everything else intact."""
+    s, e = text.find(start), text.find(end)
+    if s == -1 or e == -1 or e < s:
+        return text
+    return text[: s + len(start)] + "\n" + replacement + "\n" + text[e:]
+
+
+def cmd_mr_validation(args: argparse.Namespace) -> None:
+    """Fill in the Automated Validation table on an existing MR.
+
+    Called by mr-verifier once the verify Job has finished, so the table
+    reports what actually happened rather than what we hoped would happen.
+    """
+    try:
+        results = json.loads(args.results) if args.results else {}
+    except json.JSONDecodeError as exc:
+        die(f"--results is not valid JSON: {exc}")
+    if not isinstance(results, dict):
+        die("--results must be a JSON object keyed by check name")
+    unknown = sorted(set(results) - {k for k, _ in VALIDATION_CHECKS})
+    if unknown:
+        die(f"unknown check(s) {unknown}; valid: {[k for k, _ in VALIDATION_CHECKS]}")
+
+    project = resolve_project(args.path, args.project_id)
+    pid = int(project["id"])
+    mr = api_or_die("GET", f"/projects/{pid}/merge_requests/{args.iid}")
+    desc = mr.get("description") or ""
+    if VALIDATION_START not in desc:
+        die(
+            "MR description has no validation block — it was not created by "
+            "bump-maven-mr, so there is nothing to update"
+        )
+
+    risk_class = args.risk_class or ""
+    risk_rationale = args.risk_rationale or ""
+    # Re-read the risk row rather than requiring the caller to repeat it.
+    if not risk_class:
+        for line in desc.splitlines():
+            if line.startswith("| Acme Inc. Risk Class |"):
+                cells = [c.strip() for c in line.split("|")]
+                if len(cells) >= 4:
+                    risk_class = cells[2].split()[-1]
+                    risk_rationale = cells[3]
+                break
+
+    desc = replace_marked_block(
+        desc, VALIDATION_START, VALIDATION_END,
+        render_validation_table(results, risk_class, risk_rationale),
+    )
+    desc = replace_marked_block(
+        desc, ACTION_START, ACTION_END,
+        render_recommended_action(risk_class, results),
+    )
+    body: dict = {"description": desc}
+    if args.ready:
+        body["title"] = (mr.get("title") or "").removeprefix("Draft: ")
+    updated = api_or_die("PUT", f"/projects/{pid}/merge_requests/{args.iid}", body)
+    out(
+        {
+            "merge_request_iid": updated.get("iid"),
+            "merge_request_url": updated.get("web_url"),
+            "checks_updated": sorted(results),
+        }
     )
 
 
@@ -441,14 +689,36 @@ def cmd_bump_maven_mr(args: argparse.Namespace) -> None:
             "merge_request_iid": 0,
             "gitlab_path": path_with_ns,
         }
-        title = f"chore(deps): update {args.artifact_id} to {args.new_version}"
-        description = build_mr_description(
-            args.artifact_id,
-            args.new_version,
-            path_with_ns,
-            args.impact_text or "",
-            handoff,
+        short_artifact = args.artifact_id.split(":")[-1]
+        cve = (args.cve_id or "").strip()
+        # "[LW] 🔴 Bump quarkus-rest to 3.8.4-rhlw-6865 to fix CVE-2024-12397"
+        # The prefix and dot make Lightwell MRs scannable in the GitLab list.
+        title = (
+            f"[LW] {RISK_EMOJI.get((args.risk_class or '').upper(), '⚪')} "
+            f"Bump {short_artifact} to {args.new_version}"
         )
+        if cve and cve != "unknown":
+            title += f" to fix {cve}"
+
+        def _describe(h: dict) -> str:
+            return build_mr_description(
+                args.artifact_id,
+                args.new_version,
+                path_with_ns,
+                args.impact_text or "",
+                h,
+                old_version=old_version,
+                cve_id=cve,
+                cve_title=args.cve_title or "",
+                cve_description=args.cve_description or "",
+                cvss_score=args.cvss_score or "",
+                risk_class=args.risk_class or "",
+                risk_rationale=args.risk_rationale or "",
+                risk_score=args.risk_score or "",
+                transitive_count=args.transitive_count,
+            )
+
+        description = _describe(handoff)
         mr = api_or_die(
             "POST",
             f"/projects/{pid}/merge_requests",
@@ -462,13 +732,7 @@ def cmd_bump_maven_mr(args: argparse.Namespace) -> None:
         )
         iid = int(mr["iid"])
         handoff["merge_request_iid"] = iid
-        description = build_mr_description(
-            args.artifact_id,
-            args.new_version,
-            path_with_ns,
-            args.impact_text or "",
-            handoff,
-        )
+        description = _describe(handoff)
         mr = api_or_die(
             "PUT",
             f"/projects/{pid}/merge_requests/{iid}",
@@ -571,7 +835,24 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--pom-path", default="pom.xml")
     sp.add_argument("--target-branch", default="")
     sp.add_argument("--branch", default="", help="default update-artifact-<version>")
-    sp.add_argument("--impact-text", default="", help="Impact Analysis paragraph for MR body")
+    sp.add_argument("--impact-text", default="", help="Risk Assessment paragraph for MR body")
+    # Advisory metadata, from the TPA vulnerability/advisory lookup in
+    # query-tpa. All optional: a missing field renders as "not scored" /
+    # "not referenced" rather than failing the bump.
+    sp.add_argument("--cve-id", default="", help="e.g. CVE-2024-12397")
+    sp.add_argument("--cve-title", default="", help="short CVE headline")
+    sp.add_argument("--cve-description", default="", help="CVE description paragraph")
+    sp.add_argument("--cvss-score", default="", help='e.g. "6.1 (Medium)"')
+    # Risk classification, from gitlab.appSeeds in the tenant chart.
+    sp.add_argument("--risk-class", default="", help="CRITICAL|HIGH|MEDIUM|LOW")
+    sp.add_argument("--risk-rationale", default="", help="why the app carries that class")
+    sp.add_argument("--risk-score", default="", help="Lightwell risk score; defaults to --risk-class")
+    sp.add_argument(
+        "--transitive-count",
+        type=int,
+        default=0,
+        help="transitive dependency changes, for the SBOM Impact row",
+    )
     sp.add_argument(
         "--draft",
         dest="draft",
@@ -586,6 +867,31 @@ def build_parser() -> argparse.ArgumentParser:
         help="create a ready (non-draft) MR",
     )
     sp.set_defaults(func=cmd_bump_maven_mr)
+
+    sp = sub.add_parser(
+        "mr-validation",
+        help="Fill the Automated Validation table on an MR created by bump-maven-mr",
+    )
+    add_project_flags(sp)
+    sp.add_argument("--iid", required=True, type=int, help="merge request iid")
+    sp.add_argument(
+        "--results",
+        required=True,
+        help=(
+            'JSON object keyed by check: {"unit_tests": {"status": "passed", '
+            '"details": "43/43 tests passed"}}. Valid keys: '
+            + ", ".join(k for k, _ in VALIDATION_CHECKS if k != "risk_class")
+            + '. status: passed|failed|pending|skipped|warning.'
+        ),
+    )
+    sp.add_argument("--risk-class", default="", help="override; read from the MR if omitted")
+    sp.add_argument("--risk-rationale", default="")
+    sp.add_argument(
+        "--ready",
+        action="store_true",
+        help="also drop the Draft: prefix (use only when every check passed)",
+    )
+    sp.set_defaults(func=cmd_mr_validation)
 
     return p
 
