@@ -41,6 +41,8 @@
         app_policy_error: "invalid_json"
   when: _policy_raw.status == 200
 
+# ADR-026: approval values are auto_approve | needs_approval (never bare "auto").
+# Keep this when: free of # comments — Jinja rejects # inside the expression.
 - name: Validate policy schema (fail-closed)
   ansible.builtin.set_fact:
     app_policy_valid: false
@@ -51,7 +53,6 @@
       (app_policy.remediation_owner | default('') | length) == 0
       or (
         (app_policy.remediation_owner | default('')) == 'ao'
-        # ADR-026: values are auto_approve | needs_approval (never bare "auto").
         and (app_policy.approval | default('')) not in ['auto_approve', 'needs_approval', 'auto']
       )
       or (app_policy.remediation_owner | default('')) not in ['ao', 'renovate']
