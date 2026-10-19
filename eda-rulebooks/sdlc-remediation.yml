@@ -2,14 +2,13 @@
 # SDLC remediation — Event-Driven Ansible rulebook (Automation Orchestrator path)
 #
 # EDA is the sensor/bridge only (webhook-driven, no AO Approval PATCH):
-#   Nexus *.rhlw-*           → JT "SDLC Start Orchestrator"     → AO (type=start)
-#   GitLab MR merged         → JT "SDLC AO Lifecycle Webhook"   → AO (type=merged)
-#   PipelineRun terminal     → JT "SDLC AO Lifecycle Webhook"   → AO (type=build)
-#   Argo Synced+Healthy/fail → JT "SDLC AO Lifecycle Webhook"   → AO (type=deploy)
+#   Nexus *.rhlw-*           → JT "SDLC Start Orchestrator"     → AO Start workflow
+#   GitLab MR merged         → JT "SDLC AO Lifecycle Webhook"   → AO Merged+Build
+#   Argo Synced+Healthy/fail → JT "SDLC AO Lifecycle Webhook"   → AO Deploy workflow
 #
-# All rules POST the same AO webhook path (ao_start_webhook_path). AO routes on
-# trigger.type (single eda_trigger + switch). Lifecycle MUST NOT fire Start
-# Orchestrator (ADR-025). Do NOT act on MR open. For pre-AO: sdlc-remediation-legacy.yml.
+# Merged canvas polls PaC build status (ADR-039); PipelineRun→AO Build retired.
+# Lifecycle MUST NOT fire Start Orchestrator (ADR-025). Do NOT act on MR open.
+# For pre-AO: sdlc-remediation-legacy.yml.
 
 - name: SDLC OpenCode remediation
   hosts: all
@@ -19,60 +18,8 @@
         port: 5000
 
   rules:
-    # --- CI build lifecycle (PipelineRun terminal) ---
-    - name: PipelineRun succeeded → AO build webhook
-      condition: >
-        event.payload.type is defined and
-        event.payload.type == "pipelinerun_terminal" and
-        event.payload.status is defined and
-        event.payload.status == "Succeeded"
-      action:
-        run_job_template:
-          name: "SDLC AO Lifecycle Webhook"
-          organization: "{{ aap_organization_name }}"
-          job_args:
-            extra_vars:
-              ao_lifecycle_webhook_path: "{{ ao_start_webhook_path }}"
-              lifecycle_type: lightwell_build
-              signal_source: pipelinerun
-              status: Succeeded
-              guid: "{{ event.payload.guid | default(guid) }}"
-              gitlab_path: "{{ event.payload.gitlab_path | default('') }}"
-              snow_url: "{{ snow_url | default('') }}"
-              snow_svc_url: "{{ snow_svc_url | default('') }}"
-              ao_base_url: "{{ ao_base_url }}"
-              ao_client_id: "{{ ao_client_id }}"
-              ao_client_secret: "{{ ao_client_secret }}"
-              validate_certs: "{{ validate_certs | default(false) }}"
-
-    - name: PipelineRun failed → AO build webhook
-      condition: >
-        event.payload.type is defined and
-        event.payload.type == "pipelinerun_terminal" and
-        event.payload.status is defined and
-        (event.payload.status == "Failed" or
-         event.payload.status == "Cancelled" or
-         event.payload.status == "Error")
-      action:
-        run_job_template:
-          name: "SDLC AO Lifecycle Webhook"
-          organization: "{{ aap_organization_name }}"
-          job_args:
-            extra_vars:
-              ao_lifecycle_webhook_path: "{{ ao_start_webhook_path }}"
-              lifecycle_type: lightwell_build
-              signal_source: pipelinerun
-              status: "{{ event.payload.status }}"
-              guid: "{{ event.payload.guid | default(guid) }}"
-              gitlab_path: "{{ event.payload.gitlab_path | default('') }}"
-              snow_url: "{{ snow_url | default('') }}"
-              snow_svc_url: "{{ snow_svc_url | default('') }}"
-              ao_base_url: "{{ ao_base_url }}"
-              ao_client_id: "{{ ao_client_id }}"
-              ao_client_secret: "{{ ao_client_secret }}"
-              validate_certs: "{{ validate_certs | default(false) }}"
-
     # --- Deploy lifecycle (Argo health) ---
+    # Build is polled inside AO Merged (ADR-039); ignore pipelinerun_terminal.
     - name: Argo Healthy → AO deploy webhook
       condition: >
         event.payload.type is defined and
@@ -87,7 +34,7 @@
           organization: "{{ aap_organization_name }}"
           job_args:
             extra_vars:
-              ao_lifecycle_webhook_path: "{{ ao_start_webhook_path }}"
+              ao_lifecycle_webhook_path: "{{ ao_deploy_webhook_path }}"
               lifecycle_type: lightwell_deploy
               signal_source: argo_healthy
               sync: Synced
@@ -114,7 +61,7 @@
           organization: "{{ aap_organization_name }}"
           job_args:
             extra_vars:
-              ao_lifecycle_webhook_path: "{{ ao_start_webhook_path }}"
+              ao_lifecycle_webhook_path: "{{ ao_deploy_webhook_path }}"
               lifecycle_type: lightwell_deploy
               signal_source: argo_failed
               sync: "{{ event.payload.sync | default('') }}"
@@ -142,13 +89,16 @@
           organization: "{{ aap_organization_name }}"
           job_args:
             extra_vars:
-              ao_lifecycle_webhook_path: "{{ ao_start_webhook_path }}"
+              ao_lifecycle_webhook_path: "{{ ao_merged_webhook_path }}"
               lifecycle_type: lightwell_mr_merged
               signal_source: gitlab_mr_merged
               guid: "{{ guid | default('') }}"
               gitlab_path: "{{ event.payload.project.path_with_namespace | default('') }}"
               merge_request_iid: "{{ event.payload.object_attributes.iid | default('') }}"
+              merge_commit_sha: "{{ event.payload.object_attributes.merge_commit_sha | default('') }}"
               project_id: "{{ event.payload.project.id | default('') }}"
+              gitlab_url: "{{ gitlab_url | default('') }}"
+              gitlab_token: "{{ gitlab_token | default('') }}"
               snow_url: "{{ snow_url | default('') }}"
               snow_svc_url: "{{ snow_svc_url | default('') }}"
               ao_base_url: "{{ ao_base_url }}"

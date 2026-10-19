@@ -1,0 +1,189 @@
+---
+# After GitLab MR merge: poll PaC commit status until the push build is terminal.
+# PaC mirrors PipelineRun success/failure onto the merge commit (source=external
+# pipeline + commit status "Pipelines as Code CI / build-push-to-main").
+# Used by AO Merged+Build canvas so we do not need a second Build webhook.
+#
+# Requires: gitlab_url, gitlab_token|gitlab_pat, gitlab_path
+# Optional: merge_request_iid, merge_commit_sha, project_id,
+#           build_poll_retries (90), build_poll_delay (10)
+# Exports: status (Succeeded|Failed|Cancelled|TimedOut), pipelinerun-ish fields
+- name: Poll PaC / push build status via GitLab
+  hosts: localhost
+  gather_facts: false
+
+  tasks:
+    - name: Require GitLab coordinates
+      ansible.builtin.assert:
+        that:
+          - (gitlab_url | default('') | length) > 0
+          - (gitlab_token | default(gitlab_pat | default('')) | length) > 0
+          - (gitlab_path | default('') | length) > 0
+        fail_msg: "gitlab_url, gitlab_token, and gitlab_path are required"
+
+    - name: Resolve GitLab project id
+      ansible.builtin.uri:
+        url: "{{ gitlab_url | regex_replace('/$', '') }}/api/v4/projects/{{ gitlab_path | regex_replace('/', '%2F') }}"
+        method: GET
+        headers:
+          PRIVATE-TOKEN: "{{ gitlab_token | default(gitlab_pat | default('')) }}"
+        status_code: [200]
+        validate_certs: "{{ validate_certs | default(false) }}"
+      register: _proj
+      no_log: true
+      when: (project_id | default(0) | int) == 0
+
+    - name: Set project id
+      ansible.builtin.set_fact:
+        _project_id: "{{ (project_id | default(0) | int) if (project_id | default(0) | int) > 0 else (_proj.json.id | int) }}"
+
+    - name: Resolve merge commit SHA from MR
+      ansible.builtin.uri:
+        url: "{{ gitlab_url | regex_replace('/$', '') }}/api/v4/projects/{{ _project_id }}/merge_requests/{{ merge_request_iid }}"
+        method: GET
+        headers:
+          PRIVATE-TOKEN: "{{ gitlab_token | default(gitlab_pat | default('')) }}"
+        status_code: [200]
+        validate_certs: "{{ validate_certs | default(false) }}"
+      register: _mr
+      no_log: true
+      when:
+        - (merge_commit_sha | default('') | length) == 0
+        - (merge_request_iid | default(0) | int) > 0
+
+    - name: Pick commit SHA to watch
+      ansible.builtin.set_fact:
+        _sha: >-
+          {{
+            merge_commit_sha
+            | default(
+                _mr.json.merge_commit_sha
+                | default(_mr.json.squash_commit_sha | default(''), true)
+                | default('', true),
+                true
+              )
+            | trim
+          }}
+
+    - name: Fall back to default-branch HEAD when SHA unknown
+      ansible.builtin.uri:
+        url: "{{ gitlab_url | regex_replace('/$', '') }}/api/v4/projects/{{ _project_id }}/repository/commits/{{ gitlab_default_branch | default('main') }}?stats=false"
+        method: GET
+        headers:
+          PRIVATE-TOKEN: "{{ gitlab_token | default(gitlab_pat | default('')) }}"
+        status_code: [200]
+        validate_certs: "{{ validate_certs | default(false) }}"
+      register: _head
+      no_log: true
+      when: (_sha | default('') | length) == 0
+
+    - name: Apply HEAD SHA fallback
+      ansible.builtin.set_fact:
+        _sha: "{{ _head.json.id }}"
+      when:
+        - (_sha | default('') | length) == 0
+        - _head is defined
+        - (_head.status | default(0) | int) == 200
+
+    - name: Require a commit SHA
+      ansible.builtin.assert:
+        that:
+          - (_sha | default('') | length) > 0
+        fail_msg: "Could not resolve merge_commit_sha / default-branch HEAD for build poll"
+
+    - name: Poll GitLab commit statuses for PaC build
+      ansible.builtin.uri:
+        url: "{{ gitlab_url | regex_replace('/$', '') }}/api/v4/projects/{{ _project_id }}/repository/commits/{{ _sha }}/statuses?per_page=50"
+        method: GET
+        headers:
+          PRIVATE-TOKEN: "{{ gitlab_token | default(gitlab_pat | default('')) }}"
+        status_code: [200]
+        validate_certs: "{{ validate_certs | default(false) }}"
+      register: _statuses
+      until: >-
+        (
+          (_statuses.json | default([]))
+          | selectattr('name', 'defined')
+          | selectattr('name', 'search', 'build-push-to-main')
+          | selectattr('status', 'defined')
+          | selectattr('status', 'in', ['success', 'failed', 'canceled'])
+          | list
+          | length
+        ) > 0
+      retries: "{{ build_poll_retries | default(90) | int }}"
+      delay: "{{ build_poll_delay | default(10) | int }}"
+      no_log: true
+
+    - name: Select PaC build status row
+      ansible.builtin.set_fact:
+        _pac_rows: >-
+          {{
+            (_statuses.json | default([]))
+            | selectattr('name', 'defined')
+            | selectattr('name', 'search', 'build-push-to-main')
+            | list
+          }}
+        _any_terminal: >-
+          {{
+            (_statuses.json | default([]))
+            | selectattr('status', 'defined')
+            | selectattr('status', 'in', ['success', 'failed', 'canceled'])
+            | list
+          }}
+
+    - name: Map GitLab status → AO build status
+      ansible.builtin.set_fact:
+        _gl_status: >-
+          {{
+            (_pac_rows | first).status
+            if (_pac_rows | length) > 0
+            else (
+              (_any_terminal | first).status
+              if (_any_terminal | length) > 0
+              else 'timed_out'
+            )
+          }}
+        _status_name: >-
+          {{
+            (_pac_rows | first).name
+            if (_pac_rows | length) > 0
+            else (
+              (_any_terminal | first).name
+              if (_any_terminal | length) > 0
+              else ''
+            )
+          }}
+
+    - name: Translate to PipelineRun-style status
+      ansible.builtin.set_fact:
+        build_status: >-
+          {{
+            {
+              'success': 'Succeeded',
+              'failed': 'Failed',
+              'canceled': 'Cancelled',
+              'timed_out': 'TimedOut'
+            }[_gl_status | default('timed_out')]
+            | default('Failed')
+          }}
+
+    - name: Soft note when poll timed out
+      ansible.builtin.debug:
+        msg: >-
+          No terminal PaC status for {{ gitlab_path }} sha={{ _sha[:12] }}
+          after {{ build_poll_retries | default(90) }} polls —
+          exporting status={{ build_status }}.
+      when: (_gl_status | default('')) == 'timed_out'
+
+    - name: Export build poll artifacts
+      ansible.builtin.set_stats:
+        data:
+          status: "{{ build_status }}"
+          build_status: "{{ build_status }}"
+          gitlab_path: "{{ gitlab_path }}"
+          merge_request_iid: "{{ merge_request_iid | default('') }}"
+          merge_commit_sha: "{{ _sha }}"
+          project_id: "{{ _project_id }}"
+          pac_status_name: "{{ _status_name }}"
+          signal_source: ao_poll_gitlab_pac
+        per_host: false

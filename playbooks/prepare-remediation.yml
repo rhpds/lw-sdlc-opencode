@@ -1,0 +1,34 @@
+---
+# Start-canvas prep: parent SNOW → TPA → classify → parent comment → children.
+# JT name: "SDLC Prepare Remediation". AO Start is then
+#   eda_trigger → prepare → apps_loop (Impact / Verifier / iteration SNOW).
+#
+# Facts persist across imported plays on localhost (parent_incident set_fact
+# in snow-create-incident; affected_repos / ao_apps / snow_comment_body from
+# query-tpa + classify). Final set_stats come from snow-create-children.
+- ansible.builtin.import_playbook: snow-create-incident.yml
+
+- ansible.builtin.import_playbook: query-tpa.yml
+
+- ansible.builtin.import_playbook: classify-affected-apps.yml
+
+- name: Post classify summary on parent incident
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Ensure comment targets parent
+      ansible.builtin.set_fact:
+        snow_incident: "{{ parent_incident | default(snow_incident | default(''), true) }}"
+
+- ansible.builtin.import_playbook: snow-comment.yml
+
+- name: Ensure create-children sees parent
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Re-assert parent for children play
+      ansible.builtin.set_fact:
+        parent_incident: "{{ parent_incident | default(snow_incident | default(''), true) }}"
+        snow_incident: "{{ parent_incident | default(snow_incident | default(''), true) }}"
+
+- ansible.builtin.import_playbook: snow-create-children.yml

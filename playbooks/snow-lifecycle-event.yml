@@ -109,3 +109,14 @@
           gitlab_path: "{{ gitlab_path }}"
           iteration_outcome: "{{ iteration_outcome | default('commented') }}"
         per_host: false
+
+    # AO Merged+Build (ADR-039): book the child INC, then fail the JT so the
+    # workflow run ends Failed when CI did not succeed.
+    - name: Fail AO run on hard lifecycle outcomes
+      ansible.builtin.fail:
+        msg: >-
+          Lifecycle outcome {{ iteration_outcome }} for {{ gitlab_path }} —
+          failing the AO workflow run.
+      when:
+        - fail_on_bad_outcome | default(false) | bool
+        - (iteration_outcome | default('')) in ['build_failed', 'deploy_failed']

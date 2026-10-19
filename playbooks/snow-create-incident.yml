@@ -51,6 +51,11 @@
         validate_certs: "{{ validate_certs | default(false) }}"
       register: snow_create
 
+    - name: Remember parent for later plays in the same job
+      ansible.builtin.set_fact:
+        parent_incident: "{{ snow_create.json.result.number }}"
+        snow_incident: "{{ snow_create.json.result.number }}"
+
     - name: Export parent incident for AO
       ansible.builtin.set_stats:
         data:
