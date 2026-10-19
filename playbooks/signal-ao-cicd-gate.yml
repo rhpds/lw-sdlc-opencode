@@ -1,16 +1,17 @@
 ---
-# Signal a parked AO CI/CD Approval gate (await_build / await_deploy).
+# Signal a parked AO Approval gate:
+#   await_gitlab_merge | await_build | await_deploy
 #
-# AO product Wait is duration-only. CI/CD parks on Approval nodes; EDA wakes
+# AO product Wait is duration-only. Gates park on Approval nodes; EDA wakes
 # them via PATCH /api/v1/approvals/{id} with {"status": "approved"|"rejected"}.
 # (POST …/activities/{id}/signal returns Temporal 500 on this build — do not use.)
 #
 # Required vars:
 #   ao_base_url, ao_client_id, ao_client_secret
-#   gate_node_id: await_build | await_deploy
+#   gate_node_id: await_gitlab_merge | await_build | await_deploy
 #   decision: approved | rejected
 # Correlation (at least one of):
-#   guid + gitlab_path  (preferred from PipelineRun / Argo events)
+#   guid + gitlab_path  (preferred from GitLab / PipelineRun / Argo events)
 #   ao_execution_id     (optional, narrows the search)
 - name: Signal AO CI/CD Approval gate
   hosts: localhost
@@ -23,7 +24,8 @@
           {{
             'approved'
             if (decision | default('') | lower) in [
-              'approved', 'approve', 'success', 'succeeded', 'healthy', 'synced'
+              'approved', 'approve', 'success', 'succeeded', 'healthy',
+              'synced', 'merged', 'merge'
             ]
             else 'rejected'
           }}
@@ -38,13 +40,13 @@
           - (ao_base_url | default('') | length) > 0
           - (ao_client_id | default('') | length) > 0
           - (ao_client_secret | default('') | length) > 0
-          - _gate in ['await_build', 'await_deploy']
+          - _gate in ['await_gitlab_merge', 'await_build', 'await_deploy']
           - _decision in ['approved', 'rejected']
           - (_path | length) > 0 or (_guid | length) > 0 or (_exec | length) > 0
         fail_msg: >-
           Need ao_base_url/client credentials, gate_node_id in
-          {await_build,await_deploy}, a decidable decision, and correlation
-          (gitlab_path and/or guid and/or ao_execution_id).
+          {await_gitlab_merge,await_build,await_deploy}, a decidable decision,
+          and correlation (gitlab_path and/or guid and/or ao_execution_id).
 
     - name: Obtain AO OAuth token (client_credentials)
       ansible.builtin.uri:
@@ -89,6 +91,21 @@
           (_guid | length) == 0
           or (_guid in (item.prompt | default('')))
           or (_path | length) > 0
+
+    - name: Soft-skip when no await_gitlab_merge pending
+      ansible.builtin.debug:
+        msg: >-
+          No pending {{ _gate }} for path={{ _path }} — ignoring
+          (common when auto_approve AO-merge also fires a GitLab webhook).
+      when:
+        - (_match | length) == 0
+        - _gate == 'await_gitlab_merge'
+
+    - name: End when soft-skip
+      ansible.builtin.meta: end_play
+      when:
+        - (_match | length) == 0
+        - _gate == 'await_gitlab_merge'
 
     - name: Require exactly one pending gate
       ansible.builtin.assert:

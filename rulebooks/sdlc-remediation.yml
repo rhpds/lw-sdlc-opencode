@@ -3,11 +3,12 @@
 #
 # EDA is the sensor/bridge only:
 #   Nexus *.rhlw-*           → JT "SDLC Start Orchestrator"  → AO owns the run
-#   PipelineRun terminal     → JT "SDLC Signal AO CI/CD Gate" (await_build)
-#   Argo Synced+Healthy/fail → JT "SDLC Signal AO CI/CD Gate" (await_deploy)
+#   GitLab MR merged         → JT Signal (await_gitlab_merge) — student merge path
+#   PipelineRun terminal     → JT Signal (await_build)
+#   Argo Synced+Healthy/fail → JT Signal (await_deploy)
 #
-# Lifecycle signals MUST NOT Start a second remediation (ADR-025 / ADR-033).
-# Conditions use ansible-rulebook syntax only (no Jinja filters in conditions).
+# Lifecycle signals MUST NOT Start a second remediation (ADR-025 / ADR-033/034).
+# Do NOT resume on MR open (ADR-025). Conditions: ansible-rulebook syntax only.
 # For the pre-AO chain, use sdlc-remediation-legacy.yml.
 
 - name: SDLC OpenCode remediation
@@ -112,6 +113,31 @@
               gitlab_path: "{{ event.payload.gitlab_path | default('') }}"
               ao_execution_id: "{{ event.payload.ao_execution_id | default('') }}"
               signal_source: argo_failed
+              ao_base_url: "{{ ao_base_url }}"
+              ao_client_id: "{{ ao_client_id }}"
+              ao_client_secret: "{{ ao_client_secret }}"
+              validate_certs: "{{ validate_certs | default(false) }}"
+
+    # --- Student merge (needs_approval): GitLab MR merged, not open (ADR-025) ---
+    # GitLab webhook object_kind=merge_request, object_attributes.action=merge
+    - name: GitLab MR merged signals await_gitlab_merge
+      condition: >
+        event.payload.object_kind is defined and
+        event.payload.object_kind == "merge_request" and
+        event.payload.object_attributes is defined and
+        event.payload.object_attributes.action is defined and
+        event.payload.object_attributes.action == "merge"
+      action:
+        run_job_template:
+          name: "SDLC Signal AO CI/CD Gate"
+          organization: "{{ aap_organization_name }}"
+          job_args:
+            extra_vars:
+              gate_node_id: await_gitlab_merge
+              decision: approved
+              guid: "{{ guid | default('') }}"
+              gitlab_path: "{{ event.payload.project.path_with_namespace | default('') }}"
+              signal_source: gitlab_mr_merged
               ao_base_url: "{{ ao_base_url }}"
               ao_client_id: "{{ ao_client_id }}"
               ao_client_secret: "{{ ao_client_secret }}"
