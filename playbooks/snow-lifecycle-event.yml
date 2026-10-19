@@ -30,12 +30,16 @@
 
     # Prefer server-side filters (cmdb_ci + guid). Fall back to short_description
     # scan only if the mock is older than those query params.
+    # Deploy runs after merge/build — do not require open_only (child may already
+    # be Resolved); still take newest match for this path.
     - name: Build lifecycle lookup URL
       ansible.builtin.set_fact:
         _snow_lookup_url: >-
           {{ snow_base | regex_replace('/$', '') }}/api/v1/incidents?cmdb_ci={{ gitlab_path | urlencode }}{%
             if (guid | default('') | length) > 0
-          %}&guid={{ guid | urlencode }}{% endif %}&open_only=1&limit=5&sort_by=opened_at&sort_order=desc
+          %}&guid={{ guid | urlencode }}{% endif %}{%
+            if (_outcome | default('')) not in ['deployed', 'deploy_failed']
+          %}&open_only=1{% endif %}&limit=5&sort_by=opened_at&sort_order=desc
       when: (_target | default('') | length) == 0
 
     - name: Look up child by cmdb_ci (and guid when known)
@@ -288,13 +292,14 @@
     - name: Export artifacts
       ansible.builtin.set_stats:
         data:
-          snow_incident: "{{ _target | default('') }}"
-          child_incident: "{{ _target | default('') }}"
-          parent_incident: "{{ _parent | default('') }}"
-          gitlab_path: "{{ gitlab_path }}"
+          # Non-empty — AAP drops "" and AO then cannot read the property.
+          snow_incident: "{{ _target | default('unknown', true) }}"
+          child_incident: "{{ _target | default('unknown', true) }}"
+          parent_incident: "{{ _parent | default('unknown', true) }}"
+          gitlab_path: "{{ gitlab_path | default('unknown', true) }}"
           iteration_outcome: "{{ _outcome }}"
-          merge_request_url: "{{ _mr_url | default('') }}"
-          build_url: "{{ _build_url | default('') }}"
+          merge_request_url: "{{ _mr_url | default('n/a', true) }}"
+          build_url: "{{ _build_url | default('n/a', true) }}"
         per_host: false
 
     # AO Merged+Build (ADR-039): book the child INC, then fail the JT so the

@@ -16,6 +16,38 @@
             | default(ao_start_webhook_path | default(ao_webhook_path | default(''), true), true)
           }}
 
+    # Resolve merge SHA when EDA omitted it (GitLab merge event / AAP strips "").
+    - name: Resolve merge_commit_sha from GitLab MR when missing
+      ansible.builtin.uri:
+        url: >-
+          {{ gitlab_url | regex_replace('/$', '') }}/api/v4/projects/{{ project_id
+          }}/merge_requests/{{ merge_request_iid }}
+        method: GET
+        headers:
+          PRIVATE-TOKEN: "{{ gitlab_token | default(gitlab_pat | default('')) }}"
+        status_code: [200]
+        validate_certs: "{{ validate_certs | default(false) }}"
+      register: _lc_mr
+      no_log: true
+      when:
+        - (merge_commit_sha | default('') | length) == 0
+        - (merge_request_iid | default(0) | int) > 0
+        - (project_id | default('') | string | length) > 0
+        - (gitlab_url | default('') | length) > 0
+        - (gitlab_token | default(gitlab_pat | default('')) | length) > 0
+
+    - name: Apply resolved merge_commit_sha
+      ansible.builtin.set_fact:
+        merge_commit_sha: >-
+          {{
+            _lc_mr.json.merge_commit_sha
+            | default(_lc_mr.json.squash_commit_sha | default('unknown', true), true)
+          }}
+      when:
+        - (merge_commit_sha | default('') | length) == 0
+        - _lc_mr is defined
+        - (_lc_mr.status | default(0) | int) == 200
+
     - name: Build AO lifecycle payload
       ansible.builtin.set_fact:
         event_payload:
@@ -24,7 +56,8 @@
           guid: "{{ guid | default('') }}"
           gitlab_path: "{{ gitlab_path | default('') }}"
           merge_request_iid: "{{ merge_request_iid | default('') }}"
-          merge_commit_sha: "{{ merge_commit_sha | default('') }}"
+          # Always send a string key — AO rejects missing ${trigger.merge_commit_sha}.
+          merge_commit_sha: "{{ merge_commit_sha | default('unknown', true) }}"
           project_id: "{{ project_id | default('') }}"
           gitlab_url: "{{ gitlab_url | default('') }}"
           gitlab_token: "{{ gitlab_token | default('') }}"
@@ -32,7 +65,7 @@
           sync: "{{ sync | default('') }}"
           health: "{{ health | default('') }}"
           argo_app: "{{ argo_app | default('') }}"
-          revision: "{{ revision | default('') }}"
+          revision: "{{ revision | default('unknown', true) }}"
           approval: "{{ approval | default('') }}"
           child_incident: "{{ child_incident | default('') }}"
           parent_incident: "{{ parent_incident | default('') }}"

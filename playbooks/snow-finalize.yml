@@ -10,16 +10,51 @@
     _snow_final_state: "{{ snow_final_state | default('Resolved') }}"
 
   tasks:
-    - name: Resolve parent incident
+    - name: Resolve parent incident from vars
       ansible.builtin.set_fact:
-        _parent: "{{ parent_incident | default(snow_incident | default('')) }}"
+        _parent: "{{ parent_incident | default(snow_incident | default(''), true) }}"
+
+    # Deploy EDA signal has no parent — recover via child cmdb_ci = gitlab_path.
+    - name: Look up child by gitlab_path when parent missing
+      ansible.builtin.uri:
+        url: >-
+          {{ snow_base | regex_replace('/$', '') }}/api/v1/incidents?cmdb_ci={{
+            gitlab_path | urlencode }}&guid={{ guid | default('') | urlencode }}&limit=5
+        method: GET
+        status_code: [200]
+        validate_certs: "{{ validate_certs | default(false) }}"
+      register: _fin_list
+      when:
+        - (_parent | default('') | length) == 0 or (_parent | default('')) == 'unknown'
+        - (gitlab_path | default('') | length) > 0
+        - (snow_base | default('') | length) > 0
+
+    - name: Take parent from matched child
+      ansible.builtin.set_fact:
+        _parent: >-
+          {{
+            (_fin_list.json.result | default([]))
+            | map(attribute='parent_incident')
+            | select('string')
+            | reject('equalto', '')
+            | list
+            | first
+            | default(_parent, true)
+          }}
+      when:
+        - _fin_list is defined
+        - _fin_list is succeeded
+        - (_fin_list.json.result | default([]) | length) > 0
 
     - name: Require parent incident
       ansible.builtin.assert:
         that:
           - (snow_base | default('') | length) > 0
           - (_parent | default('') | length) > 0
-        fail_msg: "snow_base and parent_incident (or snow_incident) are required"
+          - (_parent | default('')) != 'unknown'
+        fail_msg: >-
+          snow_base and parent_incident are required (got parent={{ _parent | default('') }},
+          gitlab_path={{ gitlab_path | default('') }})
 
     - name: GET parent (includes child_incidents)
       ansible.builtin.uri:

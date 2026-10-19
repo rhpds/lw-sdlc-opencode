@@ -190,14 +190,15 @@
     - name: Export build poll artifacts
       ansible.builtin.set_stats:
         data:
-          status: "{{ build_status }}"
-          build_status: "{{ build_status }}"
+          # Non-empty strings — AAP drops "" keys and AO then fails lookups.
+          status: "{{ build_status | default('unknown', true) }}"
+          build_status: "{{ build_status | default('unknown', true) }}"
           gitlab_path: "{{ gitlab_path }}"
-          merge_request_iid: "{{ merge_request_iid | default('') }}"
-          merge_commit_sha: "{{ _sha }}"
+          merge_request_iid: "{{ merge_request_iid | default('0', true) }}"
+          merge_commit_sha: "{{ _sha | default('unknown', true) }}"
           project_id: "{{ _project_id }}"
-          pac_status_name: "{{ _status_name }}"
-          build_url: "{{ _build_url | default('') }}"
-          pac_target_url: "{{ _build_url | default('') }}"
+          pac_status_name: "{{ _status_name | default('n/a', true) }}"
+          build_url: "{{ _build_url | default('n/a', true) }}"
+          pac_target_url: "{{ _build_url | default('n/a', true) }}"
           signal_source: ao_poll_gitlab_pac
         per_host: false

@@ -154,16 +154,18 @@
         - _already_project is defined
         - (_already_project.status | default(0) | int) == 200
 
+    # AAP omits empty-string set_stats keys; AO then fails property lookup on
+    # ${impact.artifacts.opencode_session_summary}. Always export non-empty.
     - name: Export impact artifacts for AO loop
       ansible.builtin.set_stats:
         data:
           gitlab_path: "{{ opencode_gitlab_path | default('') }}"
           approval: "{{ app_approval | default('needs_approval') }}"
-          opencode_session_id: "{{ opencode_session_id | default('') }}"
-          opencode_session_title: "{{ opencode_session_title | default('') }}"
-          opencode_session_summary: "{{ opencode_session_summary | default('') }}"
-          opencode_session_ui_url: "{{ opencode_session_ui_url | default('') }}"
-          opencode_ui_url: "{{ opencode_ui_url | default('') }}"
+          opencode_session_id: "{{ opencode_session_id | default('n/a', true) }}"
+          opencode_session_title: "{{ opencode_session_title | default('n/a', true) }}"
+          opencode_session_summary: "{{ opencode_session_summary | default('n/a', true) }}"
+          opencode_session_ui_url: "{{ opencode_session_ui_url | default('n/a', true) }}"
+          opencode_ui_url: "{{ opencode_ui_url | default('n/a', true) }}"
           draft_mr: "{{ false if (impact_already_current | default(false) | bool) else true }}"
           remediation_needed: "{{ not (impact_already_current | default(false) | bool) }}"
           iteration_outcome: "{{ iteration_outcome | default('mr_opened') }}"
