@@ -35,3 +35,4 @@
           snow_last_comment_id: "{{ snow_comment.json.result.sys_id | default('') }}"
           snow_incident: "{{ snow_incident }}"
         per_host: false
+      when: not (sdlc_suppress_set_stats | default(false) | bool)

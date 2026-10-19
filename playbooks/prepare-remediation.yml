@@ -1,11 +1,21 @@
 ---
 # Start-canvas prep: parent SNOW → TPA → classify → parent comment → children.
 # JT name: "SDLC Prepare Remediation". AO Start is then
-#   eda_trigger → prepare → apps_loop (Impact / Verifier / iteration SNOW).
+#   eda_trigger → prepare → apps_loop (Impact / Verifier / merge-or-await).
 #
-# Facts persist across imported plays on localhost (parent_incident set_fact
-# in snow-create-incident; affected_repos / ao_apps / snow_comment_body from
-# query-tpa + classify). Final set_stats come from snow-create-children.
+# IMPORTANT: AAP merges multiple set_stats in one job by concatenating strings
+# and extending lists. That doubled parent_incident (INC…INC…) and duplicated
+# ao_apps (classify list + children list), breaking the for-each (missing
+# child_incident on the first item). Imported plays suppress set_stats; this
+# playbook exports artifacts exactly once at the end.
+- name: Prepare bundle — suppress intermediate set_stats
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Flag imported plays to skip set_stats
+      ansible.builtin.set_fact:
+        sdlc_suppress_set_stats: true
+
 - ansible.builtin.import_playbook: snow-create-incident.yml
 
 - ansible.builtin.import_playbook: query-tpa.yml
@@ -32,3 +42,30 @@
         snow_incident: "{{ parent_incident | default(snow_incident | default(''), true) }}"
 
 - ansible.builtin.import_playbook: snow-create-children.yml
+
+- name: Export Prepare Remediation artifacts once for AO
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Require parent and enriched ao_apps
+      ansible.builtin.assert:
+        that:
+          - (parent_incident | default('') | length) > 0
+          - (ao_apps_with_children | default([]) | length) > 0
+        fail_msg: >-
+          Prepare export needs parent_incident and ao_apps_with_children
+          (got parent={{ parent_incident | default('') }},
+          children={{ ao_apps_with_children | default([]) | length }})
+
+    - name: Single set_stats for AO Start for-each
+      ansible.builtin.set_stats:
+        data:
+          parent_incident: "{{ parent_incident }}"
+          snow_incident: "{{ parent_incident }}"
+          ao_apps: "{{ ao_apps_with_children }}"
+          package_info: "{{ package_info | default({}) }}"
+          affected_repos: "{{ affected_repos | default([]) }}"
+          blast_radius: "{{ blast_radius | default({}) }}"
+          renovate_skips: "{{ renovate_skips | default([]) }}"
+          policy_failures: "{{ policy_failures | default([]) }}"
+        per_host: false

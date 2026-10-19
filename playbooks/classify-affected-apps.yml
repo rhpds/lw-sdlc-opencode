@@ -73,6 +73,7 @@
           package_info: "{{ package_info | default({}) }}"
           snow_incident: "{{ snow_incident | default('') }}"
         per_host: false
+      when: not (sdlc_suppress_set_stats | default(false) | bool)
 
     - name: Fail when no AO-eligible apps
       ansible.builtin.fail:

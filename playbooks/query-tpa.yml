@@ -178,6 +178,7 @@
           blast_radius: "{{ blast_radius }}"
           query: "{{ package_purl | default(resolved_artifact_id, true) }}"
         per_host: false
+      when: not (sdlc_suppress_set_stats | default(false) | bool)
 
     # AO canvas gates Impact on Query TPA job success. Legacy EDA already received
     # the tpa_results callback above when eda_webhook_url is set.

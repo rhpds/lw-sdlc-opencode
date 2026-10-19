@@ -65,6 +65,8 @@
           snow_incident: "{{ snow_create.json.result.number }}"
           snow_incident_sys: "{{ snow_create.json.result }}"
         per_host: false
+      # prepare-remediation.yml exports once — AAP concatenates repeated set_stats.
+      when: not (sdlc_suppress_set_stats | default(false) | bool)
 
     - name: Show created parent incident
       ansible.builtin.debug:

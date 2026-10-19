@@ -66,3 +66,5 @@
           package_info: "{{ package_info | default({}) }}"
           renovate_skips: "{{ renovate_skips | default([]) }}"
         per_host: false
+      # prepare-remediation.yml does a single final set_stats (AAP concat bug).
+      when: not (sdlc_suppress_set_stats | default(false) | bool)
