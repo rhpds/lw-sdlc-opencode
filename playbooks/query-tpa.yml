@@ -86,6 +86,80 @@
              else (severity | default('') | title) }}
       when: tpa_vuln_items | length > 0
 
+    # TPA free-text search matches the advisory's human product name, not the
+    # Maven artifactId, so a hyphenated id finds nothing: 'commons-text'
+    # returns 0 while 'Apache Commons Text' returns CVE-2022-42889. h2 and
+    # jackson-databind only worked because their names appear verbatim.
+    # publish-remediation.sh puts the coordinate in the RHLW advisory summary,
+    # so when the vulnerability search comes back empty we can still recover
+    # the CVE from the advisory we published for this exact artifact.
+    - name: Fall back to the Lightwell advisory for this coordinate
+      ansible.builtin.uri:
+        url: "{{ tpa_url }}/api/v3/advisory?q={{ (resolved_artifact_id.split(':') | last) | urlencode }}&limit=20"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ tpa_access_token }}"
+        validate_certs: "{{ validate_certs | default(false) }}"
+        status_code: [200, 401, 404]
+      register: tpa_adv_query
+      when:
+        - tpa_access_token is defined
+        - resolved_cve_id | default('unknown') in ['', 'unknown']
+      ignore_errors: true
+
+    - name: Take the CVE named by that advisory
+      vars:
+        _adv: "{{ tpa_adv_query.json['items'] | default([]) }}"
+        _ids: >-
+          {{ _adv | map(attribute='vulnerabilities') | select('defined') | flatten
+             | selectattr('identifier', 'defined')
+             | map(attribute='identifier')
+             | select('match', '^CVE-') | list }}
+      ansible.builtin.set_fact:
+        resolved_cve_id: "{{ _ids | first }}"
+      when:
+        - tpa_adv_query is defined
+        - tpa_adv_query is succeeded
+        - (tpa_adv_query.status | default(0)) == 200
+        - (_ids | default([]) | length) > 0
+
+    - name: Describe that CVE from TPA
+      ansible.builtin.uri:
+        url: "{{ tpa_url }}/api/v3/vulnerability?q={{ resolved_cve_id | urlencode }}&limit=5"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ tpa_access_token }}"
+        validate_certs: "{{ validate_certs | default(false) }}"
+        status_code: [200, 401, 404]
+      register: tpa_cve_detail
+      when: resolved_cve_id | default('unknown') not in ['', 'unknown'] and (resolved_cve_title | default('')) == ''
+      ignore_errors: true
+
+    - name: Fill title, description and score from the CVE record
+      vars:
+        _hit: >-
+          {{ (tpa_cve_detail.json['items'] | default([])
+              | selectattr('identifier', 'defined')
+              | selectattr('identifier', 'equalto', resolved_cve_id)
+              | list | first) | default({}, true) }}
+      ansible.builtin.set_fact:
+        resolved_cve_title: "{{ _hit.title | default(resolved_cve_title | default('')) }}"
+        resolved_cve_description: "{{ _hit.description | default(resolved_cve_description | default('')) }}"
+        resolved_cvss_score: >-
+          {{ ('%.1f (%s)' % (
+               _hit.base_score | float,
+               'Critical' if (_hit.base_score | float) >= 9.0
+               else 'High' if (_hit.base_score | float) >= 7.0
+               else 'Medium' if (_hit.base_score | float) >= 4.0
+               else 'Low'))
+             if (_hit.base_score is defined and _hit.base_score is not none
+                 and (_hit.base_score | float) > 0)
+             else (resolved_cvss_score | default('')) }}
+      when:
+        - tpa_cve_detail is defined
+        - tpa_cve_detail is succeeded
+        - (tpa_cve_detail.status | default(0)) == 200
+
     - name: Build package_info
       ansible.builtin.set_fact:
         package_info:
