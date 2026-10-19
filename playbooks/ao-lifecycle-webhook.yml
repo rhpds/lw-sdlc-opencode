@@ -1,0 +1,39 @@
+---
+# Bridge: EDA lifecycle event → Automation Orchestrator eda_trigger webhook.
+# Used for GitLab MR merged, PipelineRun terminal, and Argo health — each
+# starts a short AO execution (not Approval PATCH, not a second Nexus start).
+- name: Fire AO lifecycle webhook
+  hosts: localhost
+  gather_facts: false
+
+  tasks:
+    - name: Resolve lifecycle webhook path
+      ansible.builtin.set_fact:
+        ao_webhook_path: >-
+          {{
+            ao_lifecycle_webhook_path
+            | default(ao_webhook_path | default(''), true)
+          }}
+
+    - name: Build AO lifecycle payload
+      ansible.builtin.set_fact:
+        event_payload:
+          type: "{{ lifecycle_type | default('lightwell_lifecycle') }}"
+          source: "{{ signal_source | default('eda') }}"
+          guid: "{{ guid | default('') }}"
+          gitlab_path: "{{ gitlab_path | default('') }}"
+          merge_request_iid: "{{ merge_request_iid | default('') }}"
+          project_id: "{{ project_id | default('') }}"
+          status: "{{ status | default('') }}"
+          sync: "{{ sync | default('') }}"
+          health: "{{ health | default('') }}"
+          approval: "{{ approval | default('') }}"
+          child_incident: "{{ child_incident | default('') }}"
+          parent_incident: "{{ parent_incident | default('') }}"
+          snow_incident: "{{ snow_incident | default('') }}"
+          snow_url: "{{ snow_url | default('') }}"
+          snow_svc_url: "{{ snow_svc_url | default('') }}"
+          signal_source: "{{ signal_source | default('eda') }}"
+
+    - name: Trigger Automation Orchestrator lifecycle webhook
+      ansible.builtin.import_tasks: tasks/trigger-ao-webhook.yml

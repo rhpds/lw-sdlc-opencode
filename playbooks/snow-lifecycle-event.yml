@@ -1,0 +1,111 @@
+---
+# Comment (and soft-resolve) a SNOW child for an AO lifecycle webhook run.
+# Resolves the child by gitlab_path / cmdb_ci when child_incident is not in
+# the trigger payload (GitLab / PaC / Argo events do not carry INC numbers).
+- name: Record SNOW lifecycle event for remediation app
+  hosts: localhost
+  gather_facts: false
+  vars:
+    snow_base: "{{ snow_svc_url | default(snow_url | default(''), true) }}"
+
+  tasks:
+    - name: Require snow base and gitlab_path
+      ansible.builtin.assert:
+        that:
+          - (snow_base | default('') | length) > 0
+          - (gitlab_path | default('') | length) > 0
+        fail_msg: "snow_base and gitlab_path are required for lifecycle comments"
+
+    - name: Use explicit child_incident when provided
+      ansible.builtin.set_fact:
+        _target: "{{ child_incident | default(snow_incident | default(''), true) }}"
+        _parent: "{{ parent_incident | default('', true) }}"
+
+    - name: List open incidents when target unknown
+      ansible.builtin.uri:
+        url: "{{ snow_base | regex_replace('/$', '') }}/api/v1/incidents?open_only=1&limit=200"
+        method: GET
+        status_code: [200]
+        validate_certs: "{{ validate_certs | default(false) }}"
+      register: snow_list
+      when: (_target | default('') | length) == 0
+
+    - name: Match child by cmdb_ci or short_description containing gitlab_path
+      ansible.builtin.set_fact:
+        _match: >-
+          {{
+            (snow_list.json.result | default(snow_list.json.incidents | default([])))
+            | selectattr('cmdb_ci', 'defined')
+            | selectattr('cmdb_ci', 'equalto', gitlab_path)
+            | list
+            | first
+            | default(
+                (snow_list.json.result | default(snow_list.json.incidents | default([])))
+                | selectattr('short_description', 'defined')
+                | selectattr('short_description', 'search', gitlab_path)
+                | list
+                | first
+                | default({})
+              )
+          }}
+      when: (_target | default('') | length) == 0
+
+    - name: Apply matched incident
+      ansible.builtin.set_fact:
+        _target: "{{ _match.number | default('') }}"
+        _parent: "{{ _match.parent_incident | default(_parent | default('')) }}"
+      when:
+        - (_target | default('') | length) == 0
+        - (_match | default({}) | length) > 0
+
+    - name: Soft-skip when no incident found
+      ansible.builtin.debug:
+        msg: >-
+          No SNOW incident matched gitlab_path={{ gitlab_path }} —
+          recording outcome in set_stats only (guid={{ guid | default('') }}).
+      when: (_target | default('') | length) == 0
+
+    - name: Optional manual-verify line for CI failures
+      ansible.builtin.set_fact:
+        _manual_verify_line: >-
+          {{
+            '- next: manual verify (build/deploy failed)'
+            if (iteration_outcome | default('')) in ['build_failed', 'deploy_failed']
+            else ''
+          }}
+
+    - name: Build lifecycle comment
+      ansible.builtin.set_fact:
+        snow_comment_body: |
+          Lifecycle event for {{ gitlab_path }}:
+          - outcome: {{ iteration_outcome | default('unknown') }}
+          - MR: !{{ merge_request_iid | default('n/a') }}
+          - build status: {{ build_status | default(status | default('n/a')) }}
+          - deploy health: {{ deploy_health | default(health | default('n/a')) }}
+          - source: {{ signal_source | default('eda') }}
+          - guid: {{ guid | default('') }}
+          {{ _manual_verify_line }}
+      when: (_target | default('') | length) > 0
+
+    - name: POST comment on matched incident
+      ansible.builtin.uri:
+        url: "{{ snow_base | regex_replace('/$', '') }}/api/v1/incidents/{{ _target }}/comments"
+        method: POST
+        body_format: json
+        body:
+          body: "{{ snow_comment_body }}"
+          created_by: "{{ snow_created_by | default('Lightwell AO') }}"
+          type: additional_comments
+        status_code: [201]
+        validate_certs: "{{ validate_certs | default(false) }}"
+      when: (_target | default('') | length) > 0
+
+    - name: Export artifacts
+      ansible.builtin.set_stats:
+        data:
+          snow_incident: "{{ _target | default('') }}"
+          child_incident: "{{ _target | default('') }}"
+          parent_incident: "{{ _parent | default('') }}"
+          gitlab_path: "{{ gitlab_path }}"
+          iteration_outcome: "{{ iteration_outcome | default('commented') }}"
+        per_host: false

@@ -1,15 +1,15 @@
 ---
 # SDLC remediation — Event-Driven Ansible rulebook (Automation Orchestrator path)
 #
-# EDA is the sensor/bridge only:
-#   Nexus *.rhlw-*           → JT "SDLC Start Orchestrator"  → AO owns the run
-#   GitLab MR merged         → JT Signal (await_gitlab_merge) — student merge path
-#   PipelineRun terminal     → JT Signal (await_build)
-#   Argo Synced+Healthy/fail → JT Signal (await_deploy)
+# EDA is the sensor/bridge only (webhook-driven, no AO Approval PATCH):
+#   Nexus *.rhlw-*           → JT "SDLC Start Orchestrator"     → AO start trigger
+#   GitLab MR merged         → JT "SDLC AO Lifecycle Webhook"   → AO merged trigger
+#   PipelineRun terminal     → JT "SDLC AO Lifecycle Webhook"   → AO build trigger
+#   Argo Synced+Healthy/fail → JT "SDLC AO Lifecycle Webhook"   → AO deploy trigger
 #
-# Lifecycle signals MUST NOT Start a second remediation (ADR-025 / ADR-033/034).
-# Do NOT resume on MR open (ADR-025). Conditions: ansible-rulebook syntax only.
-# For the pre-AO chain, use sdlc-remediation-legacy.yml.
+# Students always merge in GitLab. Lifecycle rules MUST NOT Start a second
+# Nexus remediation (ADR-025). Do NOT act on MR open. Conditions: ansible-rulebook
+# syntax only. For the pre-AO chain, use sdlc-remediation-legacy.yml.
 
 - name: SDLC OpenCode remediation
   hosts: all
@@ -19,8 +19,8 @@
         port: 5000
 
   rules:
-    # --- CI/CD build gate (PipelineRun terminal) ---
-    - name: PipelineRun succeeded signals await_build approve
+    # --- CI build lifecycle (PipelineRun terminal) ---
+    - name: PipelineRun succeeded → AO build webhook
       condition: >
         event.payload.type is defined and
         event.payload.type == "pipelinerun_terminal" and
@@ -28,22 +28,24 @@
         event.payload.status == "Succeeded"
       action:
         run_job_template:
-          name: "SDLC Signal AO CI/CD Gate"
+          name: "SDLC AO Lifecycle Webhook"
           organization: "{{ aap_organization_name }}"
           job_args:
             extra_vars:
-              gate_node_id: await_build
-              decision: approved
+              ao_lifecycle_webhook_path: "{{ ao_build_webhook_path }}"
+              lifecycle_type: lightwell_build
+              signal_source: pipelinerun
+              status: Succeeded
               guid: "{{ event.payload.guid | default(guid) }}"
               gitlab_path: "{{ event.payload.gitlab_path | default('') }}"
-              ao_execution_id: "{{ event.payload.ao_execution_id | default('') }}"
-              signal_source: pipelinerun
+              snow_url: "{{ snow_url | default('') }}"
+              snow_svc_url: "{{ snow_svc_url | default('') }}"
               ao_base_url: "{{ ao_base_url }}"
               ao_client_id: "{{ ao_client_id }}"
               ao_client_secret: "{{ ao_client_secret }}"
               validate_certs: "{{ validate_certs | default(false) }}"
 
-    - name: PipelineRun failed signals await_build reject
+    - name: PipelineRun failed → AO build webhook
       condition: >
         event.payload.type is defined and
         event.payload.type == "pipelinerun_terminal" and
@@ -53,23 +55,25 @@
          event.payload.status == "Error")
       action:
         run_job_template:
-          name: "SDLC Signal AO CI/CD Gate"
+          name: "SDLC AO Lifecycle Webhook"
           organization: "{{ aap_organization_name }}"
           job_args:
             extra_vars:
-              gate_node_id: await_build
-              decision: rejected
+              ao_lifecycle_webhook_path: "{{ ao_build_webhook_path }}"
+              lifecycle_type: lightwell_build
+              signal_source: pipelinerun
+              status: "{{ event.payload.status }}"
               guid: "{{ event.payload.guid | default(guid) }}"
               gitlab_path: "{{ event.payload.gitlab_path | default('') }}"
-              ao_execution_id: "{{ event.payload.ao_execution_id | default('') }}"
-              signal_source: pipelinerun
+              snow_url: "{{ snow_url | default('') }}"
+              snow_svc_url: "{{ snow_svc_url | default('') }}"
               ao_base_url: "{{ ao_base_url }}"
               ao_client_id: "{{ ao_client_id }}"
               ao_client_secret: "{{ ao_client_secret }}"
               validate_certs: "{{ validate_certs | default(false) }}"
 
-    # --- CI/CD deploy gate (Argo health) ---
-    - name: Argo Healthy signals await_deploy success
+    # --- Deploy lifecycle (Argo health) ---
+    - name: Argo Healthy → AO deploy webhook
       condition: >
         event.payload.type is defined and
         event.payload.type == "argo_app_health" and
@@ -79,22 +83,25 @@
         event.payload.health == "Healthy"
       action:
         run_job_template:
-          name: "SDLC Signal AO CI/CD Gate"
+          name: "SDLC AO Lifecycle Webhook"
           organization: "{{ aap_organization_name }}"
           job_args:
             extra_vars:
-              gate_node_id: await_deploy
-              decision: approved
+              ao_lifecycle_webhook_path: "{{ ao_deploy_webhook_path }}"
+              lifecycle_type: lightwell_deploy
+              signal_source: argo_healthy
+              sync: Synced
+              health: Healthy
               guid: "{{ event.payload.guid | default(guid) }}"
               gitlab_path: "{{ event.payload.gitlab_path | default('') }}"
-              ao_execution_id: "{{ event.payload.ao_execution_id | default('') }}"
-              signal_source: argo_healthy
+              snow_url: "{{ snow_url | default('') }}"
+              snow_svc_url: "{{ snow_svc_url | default('') }}"
               ao_base_url: "{{ ao_base_url }}"
               ao_client_id: "{{ ao_client_id }}"
               ao_client_secret: "{{ ao_client_secret }}"
               validate_certs: "{{ validate_certs | default(false) }}"
 
-    - name: Argo deploy failure signals await_deploy reject
+    - name: Argo deploy failure → AO deploy webhook
       condition: >
         event.payload.type is defined and
         event.payload.type == "argo_app_health" and
@@ -103,24 +110,26 @@
          event.payload.health == "Missing")
       action:
         run_job_template:
-          name: "SDLC Signal AO CI/CD Gate"
+          name: "SDLC AO Lifecycle Webhook"
           organization: "{{ aap_organization_name }}"
           job_args:
             extra_vars:
-              gate_node_id: await_deploy
-              decision: rejected
+              ao_lifecycle_webhook_path: "{{ ao_deploy_webhook_path }}"
+              lifecycle_type: lightwell_deploy
+              signal_source: argo_failed
+              sync: "{{ event.payload.sync | default('') }}"
+              health: "{{ event.payload.health }}"
               guid: "{{ event.payload.guid | default(guid) }}"
               gitlab_path: "{{ event.payload.gitlab_path | default('') }}"
-              ao_execution_id: "{{ event.payload.ao_execution_id | default('') }}"
-              signal_source: argo_failed
+              snow_url: "{{ snow_url | default('') }}"
+              snow_svc_url: "{{ snow_svc_url | default('') }}"
               ao_base_url: "{{ ao_base_url }}"
               ao_client_id: "{{ ao_client_id }}"
               ao_client_secret: "{{ ao_client_secret }}"
               validate_certs: "{{ validate_certs | default(false) }}"
 
-    # --- Student merge (needs_approval): GitLab MR merged, not open (ADR-025) ---
-    # GitLab webhook object_kind=merge_request, object_attributes.action=merge
-    - name: GitLab MR merged signals await_gitlab_merge
+    # --- Student merge in GitLab (never MR open — ADR-025) ---
+    - name: GitLab MR merged → AO merged webhook
       condition: >
         event.payload.object_kind is defined and
         event.payload.object_kind == "merge_request" and
@@ -129,15 +138,19 @@
         event.payload.object_attributes.action == "merge"
       action:
         run_job_template:
-          name: "SDLC Signal AO CI/CD Gate"
+          name: "SDLC AO Lifecycle Webhook"
           organization: "{{ aap_organization_name }}"
           job_args:
             extra_vars:
-              gate_node_id: await_gitlab_merge
-              decision: approved
+              ao_lifecycle_webhook_path: "{{ ao_merged_webhook_path }}"
+              lifecycle_type: lightwell_mr_merged
+              signal_source: gitlab_mr_merged
               guid: "{{ guid | default('') }}"
               gitlab_path: "{{ event.payload.project.path_with_namespace | default('') }}"
-              signal_source: gitlab_mr_merged
+              merge_request_iid: "{{ event.payload.object_attributes.iid | default('') }}"
+              project_id: "{{ event.payload.project.id | default('') }}"
+              snow_url: "{{ snow_url | default('') }}"
+              snow_svc_url: "{{ snow_svc_url | default('') }}"
               ao_base_url: "{{ ao_base_url }}"
               ao_client_id: "{{ ao_client_id }}"
               ao_client_secret: "{{ ao_client_secret }}"
