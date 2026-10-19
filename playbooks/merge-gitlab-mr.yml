@@ -7,6 +7,9 @@
 #   - open + not draft → merge immediately (do NOT PUT draft=false — GitLab
 #     17.4 returns 400 when the MR is already ready)
 #   - otherwise → fail
+#
+# Demo pacing: merge_delay_seconds (default 120) waits before the merge so
+# students can see the open MR in GitLab / SNOW first (ADR-041).
 - name: Merge GitLab merge request
   hosts: localhost
   gather_facts: false
@@ -20,6 +23,11 @@
           - (merge_request_iid | default(0) | int) > 0
           - (project_id | default(0) | int) > 0 or (gitlab_path | default('') | length) > 0
         fail_msg: "gitlab_url, token, merge_request_iid, and project_id/gitlab_path required"
+
+    - name: Wait before auto-merge (demo pacing)
+      ansible.builtin.pause:
+        seconds: "{{ merge_delay_seconds | default(120) | int }}"
+      when: (merge_delay_seconds | default(120) | int) > 0
 
     - name: Resolve project id from extra_vars
       ansible.builtin.set_fact:

@@ -2,12 +2,22 @@
 # After Deploy Healthy: resolve the parent INC. The brief "Deploy finished"
 # status + child link was already posted by snow-lifecycle-event (deployed).
 # Do not dump Argo/Route details here — those stay on the child.
+#
+# Soft-skip when this gitlab_path has no child/parent (bridge Deploy fan-out
+# for AO apps that were not in this remediation). Never fail the JT for that —
+# otherwise AO Deploy shows completed_with_errors on every promote.
 - name: Finalize ServiceNow parent incident after remediation run
   hosts: localhost
   gather_facts: false
   vars:
     snow_base: "{{ snow_svc_url | default(snow_url | default(''), true) }}"
     _snow_final_state: "{{ snow_final_state | default('Resolved') }}"
+    _missing_parents:
+      - ""
+      - "unknown"
+      - "n/a"
+      - "none"
+      - "null"
 
   tasks:
     - name: Resolve parent incident from vars
@@ -25,7 +35,7 @@
         validate_certs: "{{ validate_certs | default(false) }}"
       register: _fin_list
       when:
-        - (_parent | default('') | length) == 0 or (_parent | default('')) == 'unknown'
+        - (_parent | default('') | lower) in _missing_parents
         - (gitlab_path | default('') | length) > 0
         - (snow_base | default('') | length) > 0
 
@@ -37,6 +47,7 @@
             | map(attribute='parent_incident')
             | select('string')
             | reject('equalto', '')
+            | reject('equalto', 'unknown')
             | list
             | first
             | default(_parent, true)
@@ -46,15 +57,39 @@
         - _fin_list is succeeded
         - (_fin_list.json.result | default([]) | length) > 0
 
-    - name: Require parent incident
+    - name: Decide if parent can be finalized
+      ansible.builtin.set_fact:
+        _has_parent: >-
+          {{
+            (_parent | default('') | length) > 0
+            and ((_parent | default('') | lower) not in _missing_parents)
+          }}
+
+    - name: Soft-skip finalize when no parent for this path
+      ansible.builtin.debug:
+        msg: >-
+          No parent INC for gitlab_path={{ gitlab_path | default('') }}
+          (parent={{ _parent | default('') }}) — skipping finalize. Typical for
+          Deploy fan-out to AO apps that were not part of this remediation.
+      when: not (_has_parent | bool)
+
+    - name: Export skip artifacts
+      ansible.builtin.set_stats:
+        data:
+          parent_incident: "n/a"
+          snow_incident: "n/a"
+          finalize_skipped: "true"
+          snow_final_state: "skipped"
+          gitlab_path: "{{ gitlab_path | default('n/a', true) }}"
+        per_host: false
+      when: not (_has_parent | bool)
+
+    - name: Require snow_base when finalizing
       ansible.builtin.assert:
         that:
           - (snow_base | default('') | length) > 0
-          - (_parent | default('') | length) > 0
-          - (_parent | default('')) != 'unknown'
-        fail_msg: >-
-          snow_base and parent_incident are required (got parent={{ _parent | default('') }},
-          gitlab_path={{ gitlab_path | default('') }})
+        fail_msg: "snow_base is required to finalize parent={{ _parent }}"
+      when: (_has_parent | bool)
 
     - name: GET parent (includes child_incidents)
       ansible.builtin.uri:
@@ -63,6 +98,7 @@
         status_code: [200]
         validate_certs: "{{ validate_certs | default(false) }}"
       register: snow_parent_get
+      when: (_has_parent | bool)
 
     - name: PATCH parent state
       ansible.builtin.uri:
@@ -78,13 +114,17 @@
           resolved_by: "{{ snow_created_by | default('Lightwell AO') }}"
         status_code: [200]
         validate_certs: "{{ validate_certs | default(false) }}"
-      when: (close_parent | default(true) | bool)
+      when:
+        - (_has_parent | bool)
+        - (close_parent | default(true) | bool)
 
     - name: Export finalize artifacts
       ansible.builtin.set_stats:
         data:
           parent_incident: "{{ _parent }}"
           snow_incident: "{{ _parent }}"
+          finalize_skipped: "false"
           child_incidents: "{{ snow_parent_get.json.result.child_incidents | default([]) }}"
           snow_final_state: "{{ _snow_final_state if (close_parent | default(true) | bool) else 'open' }}"
         per_host: false
+      when: (_has_parent | bool)
