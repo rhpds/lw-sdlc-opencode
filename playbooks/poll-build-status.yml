@@ -6,7 +6,7 @@
 #
 # Also used by the AO Start canvas to gate auto_approve merges on the
 # pull-request pipeline, by passing build_status_context=build-pull-request
-# and watch_mr_head=true (ADR-048).
+# and watch_mr_head=true (ADR-049).
 #
 # Requires: gitlab_url, gitlab_token|gitlab_pat, gitlab_path
 # Optional: merge_request_iid, merge_commit_sha, project_id,
