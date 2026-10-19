@@ -8,8 +8,18 @@
 #     17.4 returns 400 when the MR is already ready)
 #   - otherwise → fail
 #
-# Demo pacing: merge_delay_seconds (default 120) waits before the merge so
-# students can see the open MR in GitLab / SNOW first (ADR-041).
+# Before merging, waits for the pull-request pipeline to report green on the
+# MR head (ADR-050). AO reaches this node ~33s after the MR opens, but
+# build-pull-request — which fills the Automated Validation table — does not
+# finish until ~110s, so without this the auto path merges with every row
+# still Pending and nothing can stop a FAILED build being merged.
+# Polling here rather than in a separate AO node keeps check and merge
+# atomic: no window in between where the MR could change.
+#
+# Optional: wait_for_status_context ("build-pull-request"; "" disables),
+#           wait_for_status_retries (60), wait_for_status_delay (10)
+# The poll leaves the MR visibly open while it runs, which is the demo window
+# merge_delay_seconds used to provide — that fixed pause is gone.
 - name: Merge GitLab merge request
   hosts: localhost
   gather_facts: false
@@ -23,11 +33,6 @@
           - (merge_request_iid | default(0) | int) > 0
           - (project_id | default(0) | int) > 0 or (gitlab_path | default('') | length) > 0
         fail_msg: "gitlab_url, token, merge_request_iid, and project_id/gitlab_path required"
-
-    - name: Wait before auto-merge (demo pacing)
-      ansible.builtin.pause:
-        seconds: "{{ merge_delay_seconds | default(120) | int }}"
-      when: (merge_delay_seconds | default(120) | int) > 0
 
     - name: Resolve project id from extra_vars
       ansible.builtin.set_fact:
@@ -60,6 +65,51 @@
         status_code: [200]
         validate_certs: "{{ validate_certs | default(false) }}"
       register: _mr
+
+    - name: Wait for the pull-request check on the MR head
+      ansible.builtin.uri:
+        url: "{{ gitlab_url | regex_replace('/$', '') }}/api/v4/projects/{{ _project_id }}/repository/commits/{{ _mr.json.sha }}/statuses?per_page=50"
+        method: GET
+        headers:
+          PRIVATE-TOKEN: "{{ gitlab_token | default(gitlab_pat) }}"
+        status_code: [200]
+        validate_certs: "{{ validate_certs | default(false) }}"
+      register: _pr_statuses
+      until: >-
+        (
+          (_pr_statuses.json | default([]))
+          | selectattr('name', 'defined')
+          | selectattr('name', 'search', wait_for_status_context | default('build-pull-request'))
+          | selectattr('status', 'defined')
+          | selectattr('status', 'in', ['success', 'failed', 'canceled'])
+          | list | length
+        ) > 0
+      retries: "{{ wait_for_status_retries | default(60) | int }}"
+      delay: "{{ wait_for_status_delay | default(10) | int }}"
+      no_log: true
+      when:
+        - (wait_for_status_context | default('build-pull-request') | length) > 0
+        - (_mr.json.state | default('')) == 'opened'
+
+    - name: Require the pull-request check to be green
+      ansible.builtin.assert:
+        that:
+          - >-
+            (
+              (_pr_statuses.json | default([]))
+              | selectattr('name', 'defined')
+              | selectattr('name', 'search', wait_for_status_context | default('build-pull-request'))
+              | selectattr('status', 'equalto', 'success')
+              | list | length
+            ) > 0
+        fail_msg: >-
+          Refusing to auto-merge !{{ merge_request_iid }}: the
+          '{{ wait_for_status_context | default('build-pull-request') }}'
+          check is not green. The MR is left open for human review.
+      when:
+        - (wait_for_status_context | default('build-pull-request') | length) > 0
+        - (_mr.json.state | default('')) == 'opened'
+        - _pr_statuses is defined and (_pr_statuses.json is defined)
 
     - name: Derive MR flags
       ansible.builtin.set_fact:
