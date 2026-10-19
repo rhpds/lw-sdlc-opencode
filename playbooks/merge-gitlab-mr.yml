@@ -122,5 +122,15 @@
           merge_request_iid: "{{ merge_request_iid | int }}"
           project_id: "{{ _project_id | int }}"
           gitlab_path: "{{ gitlab_path | default('') }}"
+          merge_request_url: "{{ _mr.json.web_url | default('') }}"
+          merge_commit_sha: >-
+            {{
+              (
+                mr_merge.json.merge_commit_sha
+                if (mr_merge is defined and (mr_merge is succeeded | default(false)))
+                else ''
+              )
+              | default(_mr.json.merge_commit_sha | default(''), true)
+            }}
           iteration_outcome: merged
         per_host: false

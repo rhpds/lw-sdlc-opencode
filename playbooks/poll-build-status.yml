@@ -153,6 +153,18 @@
               else ''
             )
           }}
+        # PaC / Tekton put the PipelineRun (or console) link on the status.
+        _build_url: >-
+          {{
+            (_pac_rows | first).target_url
+            if (_pac_rows | length) > 0
+            else (
+              (_any_terminal | first).target_url
+              if (_any_terminal | length) > 0
+              else ''
+            )
+            | default('', true)
+          }}
 
     - name: Translate to PipelineRun-style status
       ansible.builtin.set_fact:
@@ -185,5 +197,7 @@
           merge_commit_sha: "{{ _sha }}"
           project_id: "{{ _project_id }}"
           pac_status_name: "{{ _status_name }}"
+          build_url: "{{ _build_url | default('') }}"
+          pac_target_url: "{{ _build_url | default('') }}"
           signal_source: ao_poll_gitlab_pac
         per_host: false

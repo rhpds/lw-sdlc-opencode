@@ -1,5 +1,6 @@
 ---
-# Per-iteration SNOW comment after Impact/Verifier/merge/reject/CI gates.
+# Per-iteration SNOW comment after Impact/Verifier/merge/reject.
+# Prefer a short human headline + actionable links (MR URL) over raw bullets.
 - name: Comment ServiceNow with per-iteration outcome
   hosts: localhost
   gather_facts: false
@@ -11,6 +12,9 @@
       ansible.builtin.set_fact:
         # Prefer per-app child; fall back to snow_incident (legacy single-INC).
         _target_incident: "{{ child_incident | default(snow_incident | default(''), true) }}"
+        _path: "{{ gitlab_path | default('unknown') }}"
+        _outcome: "{{ iteration_outcome | default('unknown') }}"
+        _iid: "{{ merge_request_iid | default('') }}"
 
     - name: Require incident
       ansible.builtin.assert:
@@ -19,26 +23,58 @@
           - (_target_incident | default('') | length) > 0
         fail_msg: "snow_base and child_incident (or snow_incident) are required"
 
-    - name: Optional manual-verify line for CI/CD gate failures
+    - name: Resolve merge request URL
       ansible.builtin.set_fact:
-        _manual_verify_line: >-
+        _mr_url: >-
           {{
-            '- next: manual verify (CI/CD gate rejected or timed out)'
-            if (iteration_outcome | default('')) in ['build_failed', 'deploy_failed']
-            else ''
+            merge_request_url | default('', true)
+            if (merge_request_url | default('', true) | length) > 0
+            else (
+              (
+                (gitlab_url | default('', true) | regex_replace('/$', ''))
+                + '/' + (_path | default(''))
+                + '/-/merge_requests/' + (_iid | string)
+              )
+              if (
+                (gitlab_url | default('', true) | length) > 0
+                and (_path | default('') | length) > 0
+                and (_iid | default('') | string | length) > 0
+                and (_iid | default(0) | int) > 0
+              )
+              else ''
+            )
+          }}
+
+    - name: Headline by outcome
+      ansible.builtin.set_fact:
+        _headline: >-
+          {{
+            {
+              'awaiting_merge': 'Remediation MR ready for review — ' + _path,
+              'merged': 'Remediation MR auto-merged — ' + _path,
+              'already_current': 'No remediation needed — ' + _path + ' already current',
+              'verifier_fail': 'Verifier rejected remediation — ' + _path,
+              'mr_opened': 'Remediation MR opened — ' + _path,
+              'build_failed': 'Build failed after remediation — ' + _path,
+              'deploy_failed': 'Deploy failed after remediation — ' + _path,
+            }[_outcome] | default('Iteration update — ' + _path + ' (' + _outcome + ')')
           }}
 
     - name: Build iteration comment
       ansible.builtin.set_fact:
         snow_comment_body: |
-          Iteration outcome for {{ gitlab_path | default('unknown') }}:
-          - approval policy: {{ approval | default('n/a') }}
-          - outcome: {{ iteration_outcome | default('unknown') }}
-          - verifier: {{ verifier_status | default('n/a') }}
-          - MR: !{{ merge_request_iid | default('n/a') }}
-          - parent: {{ parent_incident | default('n/a') }}
-          - guid: {{ guid | default('') }}
-          {{ _manual_verify_line }}
+          {{ _headline }}
+
+          Policy: {{ approval | default('n/a') }}
+          Verifier: {{ verifier_status | default('n/a') }}
+          {% if (_iid | default('') | string | length) > 0 and (_iid | default(0) | int) > 0 -%}
+          MR: !{{ _iid }}{% if (_mr_url | default('') | length) > 0 %} — {{ _mr_url }}{% endif %}
+          {% endif -%}
+          {% if (_outcome | default('')) in ['build_failed', 'deploy_failed'] -%}
+          Next: manual verify (CI/CD gate rejected or timed out)
+          {% endif -%}
+          Parent: {{ parent_incident | default('n/a') }}
+          guid: {{ guid | default('') }}
 
     - name: POST comment on child (or legacy) incident
       ansible.builtin.uri:
@@ -58,5 +94,6 @@
           snow_incident: "{{ _target_incident }}"
           child_incident: "{{ _target_incident }}"
           parent_incident: "{{ parent_incident | default('') }}"
-          iteration_outcome: "{{ iteration_outcome | default('commented') }}"
+          iteration_outcome: "{{ _outcome }}"
+          merge_request_url: "{{ _mr_url | default('') }}"
         per_host: false

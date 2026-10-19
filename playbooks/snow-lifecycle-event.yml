@@ -2,6 +2,7 @@
 # Comment (and soft-resolve) a SNOW child for an AO lifecycle webhook run.
 # Resolves the child by gitlab_path / cmdb_ci when child_incident is not in
 # the trigger payload (GitLab / PaC / Argo events do not carry INC numbers).
+# Comment body: short headline + MR / pipeline links when available.
 - name: Record SNOW lifecycle event for remediation app
   hosts: localhost
   gather_facts: false
@@ -20,6 +21,12 @@
       ansible.builtin.set_fact:
         _target: "{{ child_incident | default(snow_incident | default(''), true) }}"
         _parent: "{{ parent_incident | default('', true) }}"
+        _path: "{{ gitlab_path }}"
+        _outcome: "{{ iteration_outcome | default('unknown') }}"
+        _iid: "{{ merge_request_iid | default('') }}"
+        _build: "{{ build_status | default(status | default('')) }}"
+        _health: "{{ deploy_health | default(health | default('')) }}"
+        _sha: "{{ merge_commit_sha | default('') }}"
 
     # Prefer server-side filters (cmdb_ci + guid). Fall back to short_description
     # scan only if the mock is older than those query params.
@@ -93,26 +100,65 @@
           recording outcome in set_stats only (guid={{ guid | default('') }}).
       when: (_target | default('') | length) == 0
 
-    - name: Optional manual-verify line for CI failures
+    - name: Resolve merge request URL
       ansible.builtin.set_fact:
-        _manual_verify_line: >-
+        _mr_url: >-
           {{
-            '- next: manual verify (build/deploy failed)'
-            if (iteration_outcome | default('')) in ['build_failed', 'deploy_failed']
-            else ''
+            merge_request_url | default('', true)
+            if (merge_request_url | default('', true) | length) > 0
+            else (
+              (
+                (gitlab_url | default('', true) | regex_replace('/$', ''))
+                + '/' + (_path | default(''))
+                + '/-/merge_requests/' + (_iid | string)
+              )
+              if (
+                (gitlab_url | default('', true) | length) > 0
+                and (_path | default('') | length) > 0
+                and (_iid | default('') | string | length) > 0
+                and (_iid | default(0) | int) > 0
+              )
+              else ''
+            )
           }}
+        _build_url: "{{ build_url | default(pac_target_url | default('', true), true) }}"
+
+    - name: Headline by outcome
+      ansible.builtin.set_fact:
+        _headline: >-
+          {{
+            {
+              'merged': 'GitLab MR merged — ' + _path,
+              'build_succeeded': 'PaC build succeeded — ' + _path,
+              'build_failed': 'PaC build failed — ' + _path,
+              'deployed': 'ArgoCD deploy Healthy — ' + _path,
+              'deploy_failed': 'ArgoCD deploy not Healthy — ' + _path,
+            }[_outcome] | default('Lifecycle update — ' + _path + ' (' + _outcome + ')')
+          }}
+      when: (_target | default('') | length) > 0
 
     - name: Build lifecycle comment
       ansible.builtin.set_fact:
         snow_comment_body: |
-          Lifecycle event for {{ gitlab_path }}:
-          - outcome: {{ iteration_outcome | default('unknown') }}
-          - MR: !{{ merge_request_iid | default('n/a') }}
-          - build status: {{ build_status | default(status | default('n/a')) }}
-          - deploy health: {{ deploy_health | default(health | default('n/a')) }}
-          - source: {{ signal_source | default('eda') }}
-          - guid: {{ guid | default('') }}
-          {{ _manual_verify_line }}
+          {{ _headline }}
+
+          {% if (_iid | default('') | string | length) > 0 and (_iid | default(0) | int) > 0 -%}
+          MR: !{{ _iid }}{% if (_mr_url | default('') | length) > 0 %} — {{ _mr_url }}{% endif %}
+          {% endif -%}
+          {% if (_build | default('') | length) > 0 -%}
+          Build: {{ _build }}{% if (_sha | default('') | length) > 0 %} ({{ _sha[:12] }}){% endif %}
+          {% endif -%}
+          {% if (_build_url | default('') | length) > 0 -%}
+          Pipeline: {{ _build_url }}
+          {% endif -%}
+          {% if (_health | default('') | length) > 0 -%}
+          Deploy health: {{ _health }}
+          {% endif -%}
+          {% if (_outcome | default('')) in ['build_failed', 'deploy_failed'] -%}
+          Next: manual verify (build/deploy failed)
+          {% endif -%}
+          Source: {{ signal_source | default('eda') }}
+          guid: {{ guid | default('') }}
       when: (_target | default('') | length) > 0
 
     - name: POST comment on matched incident
@@ -135,7 +181,9 @@
           child_incident: "{{ _target | default('') }}"
           parent_incident: "{{ _parent | default('') }}"
           gitlab_path: "{{ gitlab_path }}"
-          iteration_outcome: "{{ iteration_outcome | default('commented') }}"
+          iteration_outcome: "{{ _outcome }}"
+          merge_request_url: "{{ _mr_url | default('') }}"
+          build_url: "{{ _build_url | default('') }}"
         per_host: false
 
     # AO Merged+Build (ADR-039): book the child INC, then fail the JT so the
