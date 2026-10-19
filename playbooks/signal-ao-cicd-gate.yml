@@ -1,0 +1,137 @@
+---
+# Signal a parked AO CI/CD Approval gate (await_build / await_deploy).
+#
+# AO product Wait is duration-only. CI/CD parks on Approval nodes; EDA wakes
+# them via PATCH /api/v1/approvals/{id} with {"status": "approved"|"rejected"}.
+# (POST …/activities/{id}/signal returns Temporal 500 on this build — do not use.)
+#
+# Required vars:
+#   ao_base_url, ao_client_id, ao_client_secret
+#   gate_node_id: await_build | await_deploy
+#   decision: approved | rejected
+# Correlation (at least one of):
+#   guid + gitlab_path  (preferred from PipelineRun / Argo events)
+#   ao_execution_id     (optional, narrows the search)
+- name: Signal AO CI/CD Approval gate
+  hosts: localhost
+  gather_facts: false
+
+  tasks:
+    - name: Normalize decision and gate
+      ansible.builtin.set_fact:
+        _decision: >-
+          {{
+            'approved'
+            if (decision | default('') | lower) in [
+              'approved', 'approve', 'success', 'succeeded', 'healthy', 'synced'
+            ]
+            else 'rejected'
+          }}
+        _gate: "{{ gate_node_id | default(gate | default(''), true) }}"
+        _path: "{{ gitlab_path | default('') }}"
+        _guid: "{{ guid | default('') }}"
+        _exec: "{{ ao_execution_id | default('') }}"
+
+    - name: Require AO settings and gate
+      ansible.builtin.assert:
+        that:
+          - (ao_base_url | default('') | length) > 0
+          - (ao_client_id | default('') | length) > 0
+          - (ao_client_secret | default('') | length) > 0
+          - _gate in ['await_build', 'await_deploy']
+          - _decision in ['approved', 'rejected']
+          - (_path | length) > 0 or (_guid | length) > 0 or (_exec | length) > 0
+        fail_msg: >-
+          Need ao_base_url/client credentials, gate_node_id in
+          {await_build,await_deploy}, a decidable decision, and correlation
+          (gitlab_path and/or guid and/or ao_execution_id).
+
+    - name: Obtain AO OAuth token (client_credentials)
+      ansible.builtin.uri:
+        url: "{{ ao_base_url | regex_replace('/$', '') }}/api/v1/auth/token"
+        method: POST
+        body_format: form-urlencoded
+        body:
+          grant_type: client_credentials
+          client_id: "{{ ao_client_id }}"
+          client_secret: "{{ ao_client_secret }}"
+        status_code: [200]
+        validate_certs: "{{ validate_certs | default(false) }}"
+      register: ao_token_response
+
+    - name: List AO approvals
+      ansible.builtin.uri:
+        url: "{{ ao_base_url | regex_replace('/$', '') }}/api/v1/approvals"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ ao_token_response.json.access_token }}"
+          Accept: application/json
+        status_code: [200]
+        validate_certs: "{{ validate_certs | default(false) }}"
+      register: ao_approvals_response
+
+    - name: Find matching pending gate
+      ansible.builtin.set_fact:
+        _match: []
+
+    - name: Collect candidates
+      ansible.builtin.set_fact:
+        _match: "{{ _match + [item] }}"
+      loop: "{{ ao_approvals_response.json.resources | default([]) }}"
+      when:
+        - item.status | default('') == 'pending'
+        - item.approval_node_id | default('') == _gate
+        - (_exec | length) == 0 or (item.execution_id | default('')) == _exec
+        - >
+          (_path | length) == 0
+          or (_path in (item.prompt | default('')))
+        - >
+          (_guid | length) == 0
+          or (_guid in (item.prompt | default('')))
+          or (_path | length) > 0
+
+    - name: Require exactly one pending gate
+      ansible.builtin.assert:
+        that:
+          - (_match | length) == 1
+        fail_msg: >-
+          Expected 1 pending approval for gate={{ _gate }}
+          gitlab_path={{ _path }} guid={{ _guid }} execution={{ _exec }};
+          found {{ _match | length }}.
+          Ensure lightwell-eda-bridge SA has project-user (approval:decide)
+          on the AO project, and the canvas is parked on {{ _gate }}.
+
+    - name: Decide the Approval
+      ansible.builtin.uri:
+        url: >-
+          {{ ao_base_url | regex_replace('/$', '') }}/api/v1/approvals/{{ _match[0].id }}
+        method: PATCH
+        body_format: json
+        headers:
+          Authorization: "Bearer {{ ao_token_response.json.access_token }}"
+          Content-Type: application/json
+        body:
+          status: "{{ _decision }}"
+          decision_notes: >-
+            EDA CI/CD signal (gate={{ _gate }},
+            source={{ signal_source | default('eda') }},
+            gitlab_path={{ _path }}, guid={{ _guid }})
+        status_code: [200]
+        validate_certs: "{{ validate_certs | default(false) }}"
+      register: ao_decide_response
+
+    - name: Export artifacts
+      ansible.builtin.set_stats:
+        data:
+          approval_id: "{{ _match[0].id }}"
+          gate_node_id: "{{ _gate }}"
+          decision: "{{ _decision }}"
+          ao_execution_id: "{{ _match[0].execution_id }}"
+          gitlab_path: "{{ _path }}"
+        per_host: false
+
+    - name: Display result
+      ansible.builtin.debug:
+        msg: >-
+          Signaled AO approval {{ _match[0].id }} gate={{ _gate }}
+          decision={{ _decision }} execution={{ _match[0].execution_id }}

@@ -21,6 +21,12 @@
 
     - name: Build iteration comment
       ansible.builtin.set_fact:
+        _manual_verify_line: >-
+          {{
+            '- next: manual verify (CI/CD gate rejected or timed out)'
+            if (iteration_outcome | default('')) in ['build_failed', 'deploy_failed']
+            else ''
+          }}
         snow_comment_body: |
           Iteration outcome for {{ gitlab_path | default('unknown') }}:
           - approval policy: {{ approval | default('n/a') }}
@@ -29,6 +35,7 @@
           - MR: !{{ merge_request_iid | default('n/a') }}
           - parent: {{ parent_incident | default('n/a') }}
           - guid: {{ guid | default('') }}
+          {{ _manual_verify_line }}
 
     - name: POST comment on child (or legacy) incident
       ansible.builtin.uri:

@@ -2,10 +2,12 @@
 # SDLC remediation — Event-Driven Ansible rulebook (Automation Orchestrator path)
 #
 # EDA is the sensor/bridge only:
-#   Nexus *.rhlw-*  → JT "SDLC Start Orchestrator"  → AO owns the full run
+#   Nexus *.rhlw-*           → JT "SDLC Start Orchestrator"  → AO owns the run
+#   PipelineRun terminal     → JT "SDLC Signal AO CI/CD Gate" (await_build)
+#   Argo Synced+Healthy/fail → JT "SDLC Signal AO CI/CD Gate" (await_deploy)
 #
-# MR Verifier runs in-loop on the AO canvas after Impact. Do NOT resume AO on
-# GitLab MR open — that dual-fired Verifier and raced the in-loop agent.
+# Lifecycle signals MUST NOT Start a second remediation (ADR-025 / ADR-033).
+# MR Verifier runs in-loop on the AO canvas after Impact.
 # For the pre-AO chain, use sdlc-remediation-legacy.yml.
 
 - name: SDLC OpenCode remediation
@@ -16,6 +18,91 @@
         port: 5000
 
   rules:
+    # --- CI/CD build gate (PipelineRun terminal) ---
+    # Payload contract (helper or Tekton CloudEvent adapter):
+    #   type: pipelinerun_terminal
+    #   guid, gitlab_path, status: Succeeded|Failed
+    - name: PipelineRun terminal signals await_build
+      condition: >
+        event.payload.type is defined and
+        event.payload.type == "pipelinerun_terminal" and
+        event.payload.status is defined and
+        event.payload.status is search("(?i)^(Succeeded|Failed|Cancelled|Error)$")
+      action:
+        run_job_template:
+          name: "SDLC Signal AO CI/CD Gate"
+          organization: "{{ aap_organization_name }}"
+          job_args:
+            extra_vars:
+              gate_node_id: await_build
+              decision: >-
+                {{
+                  'approved'
+                  if (event.payload.status | default('') | lower) == 'succeeded'
+                  else 'rejected'
+                }}
+              guid: "{{ event.payload.guid | default(guid | default('')) }}"
+              gitlab_path: "{{ event.payload.gitlab_path | default('') }}"
+              ao_execution_id: "{{ event.payload.ao_execution_id | default('') }}"
+              signal_source: pipelinerun
+              ao_base_url: "{{ ao_base_url }}"
+              ao_client_id: "{{ ao_client_id }}"
+              ao_client_secret: "{{ ao_client_secret }}"
+              validate_certs: "{{ validate_certs | default(false) }}"
+
+    # --- CI/CD deploy gate (Argo health) ---
+    # Success: sync=Synced AND health=Healthy
+    # Failure: Degraded | SyncFailed | health != Healthy (when sync terminal)
+    # Progressing alone: milestone log only (next rule falls through to unmatched)
+    - name: Argo Healthy signals await_deploy success
+      condition: >
+        event.payload.type is defined and
+        event.payload.type == "argo_app_health" and
+        (event.payload.sync | default('') | lower) == "synced" and
+        (event.payload.health | default('') | lower) == "healthy"
+      action:
+        run_job_template:
+          name: "SDLC Signal AO CI/CD Gate"
+          organization: "{{ aap_organization_name }}"
+          job_args:
+            extra_vars:
+              gate_node_id: await_deploy
+              decision: approved
+              guid: "{{ event.payload.guid | default(guid | default('')) }}"
+              gitlab_path: "{{ event.payload.gitlab_path | default('') }}"
+              ao_execution_id: "{{ event.payload.ao_execution_id | default('') }}"
+              signal_source: argo_healthy
+              ao_base_url: "{{ ao_base_url }}"
+              ao_client_id: "{{ ao_client_id }}"
+              ao_client_secret: "{{ ao_client_secret }}"
+              validate_certs: "{{ validate_certs | default(false) }}"
+
+    - name: Argo deploy failure signals await_deploy reject
+      condition: >
+        event.payload.type is defined and
+        event.payload.type == "argo_app_health" and
+        (
+          (event.payload.health | default('') | lower) in ["degraded", "missing"] or
+          (event.payload.sync | default('') | lower) in ["unknown"] or
+          (event.payload.phase | default('') | lower) in ["syncfailed", "failed"]
+        )
+      action:
+        run_job_template:
+          name: "SDLC Signal AO CI/CD Gate"
+          organization: "{{ aap_organization_name }}"
+          job_args:
+            extra_vars:
+              gate_node_id: await_deploy
+              decision: rejected
+              guid: "{{ event.payload.guid | default(guid | default('')) }}"
+              gitlab_path: "{{ event.payload.gitlab_path | default('') }}"
+              ao_execution_id: "{{ event.payload.ao_execution_id | default('') }}"
+              signal_source: argo_failed
+              ao_base_url: "{{ ao_base_url }}"
+              ao_client_id: "{{ ao_client_id }}"
+              ao_client_secret: "{{ ao_client_secret }}"
+              validate_certs: "{{ validate_certs | default(false) }}"
+
     # Only Lightwell remediated artifacts (.rhlw-NNNNN). Unfiltered CREATED also
     # matches transitive deps pulled during MR verify and re-triggers the pipeline.
     - name: Nexus component created or vulnerability fix published

@@ -51,7 +51,8 @@
       (app_policy.remediation_owner | default('') | length) == 0
       or (
         (app_policy.remediation_owner | default('')) == 'ao'
-        and (app_policy.approval | default('')) not in ['auto', 'needs_approval']
+        # ADR-026: values are auto_approve | needs_approval (never bare "auto").
+        and (app_policy.approval | default('')) not in ['auto_approve', 'needs_approval', 'auto']
       )
       or (app_policy.remediation_owner | default('')) not in ['ao', 'renovate']
     )
