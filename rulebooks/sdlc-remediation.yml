@@ -7,7 +7,7 @@
 #   Argo Synced+Healthy/fail → JT "SDLC Signal AO CI/CD Gate" (await_deploy)
 #
 # Lifecycle signals MUST NOT Start a second remediation (ADR-025 / ADR-033).
-# MR Verifier runs in-loop on the AO canvas after Impact.
+# Conditions use ansible-rulebook syntax only (no Jinja filters in conditions).
 # For the pre-AO chain, use sdlc-remediation-legacy.yml.
 
 - name: SDLC OpenCode remediation
@@ -19,15 +19,12 @@
 
   rules:
     # --- CI/CD build gate (PipelineRun terminal) ---
-    # Payload contract (helper or Tekton CloudEvent adapter):
-    #   type: pipelinerun_terminal
-    #   guid, gitlab_path, status: Succeeded|Failed
-    - name: PipelineRun terminal signals await_build
+    - name: PipelineRun succeeded signals await_build approve
       condition: >
         event.payload.type is defined and
         event.payload.type == "pipelinerun_terminal" and
         event.payload.status is defined and
-        event.payload.status is search("(?i)^(Succeeded|Failed|Cancelled|Error)$")
+        event.payload.status == "Succeeded"
       action:
         run_job_template:
           name: "SDLC Signal AO CI/CD Gate"
@@ -35,13 +32,33 @@
           job_args:
             extra_vars:
               gate_node_id: await_build
-              decision: >-
-                {{
-                  'approved'
-                  if (event.payload.status | default('') | lower) == 'succeeded'
-                  else 'rejected'
-                }}
-              guid: "{{ event.payload.guid | default(guid | default('')) }}"
+              decision: approved
+              guid: "{{ event.payload.guid | default(guid) }}"
+              gitlab_path: "{{ event.payload.gitlab_path | default('') }}"
+              ao_execution_id: "{{ event.payload.ao_execution_id | default('') }}"
+              signal_source: pipelinerun
+              ao_base_url: "{{ ao_base_url }}"
+              ao_client_id: "{{ ao_client_id }}"
+              ao_client_secret: "{{ ao_client_secret }}"
+              validate_certs: "{{ validate_certs | default(false) }}"
+
+    - name: PipelineRun failed signals await_build reject
+      condition: >
+        event.payload.type is defined and
+        event.payload.type == "pipelinerun_terminal" and
+        event.payload.status is defined and
+        (event.payload.status == "Failed" or
+         event.payload.status == "Cancelled" or
+         event.payload.status == "Error")
+      action:
+        run_job_template:
+          name: "SDLC Signal AO CI/CD Gate"
+          organization: "{{ aap_organization_name }}"
+          job_args:
+            extra_vars:
+              gate_node_id: await_build
+              decision: rejected
+              guid: "{{ event.payload.guid | default(guid) }}"
               gitlab_path: "{{ event.payload.gitlab_path | default('') }}"
               ao_execution_id: "{{ event.payload.ao_execution_id | default('') }}"
               signal_source: pipelinerun
@@ -51,15 +68,14 @@
               validate_certs: "{{ validate_certs | default(false) }}"
 
     # --- CI/CD deploy gate (Argo health) ---
-    # Success: sync=Synced AND health=Healthy
-    # Failure: Degraded | SyncFailed | health != Healthy (when sync terminal)
-    # Progressing alone: milestone log only (next rule falls through to unmatched)
     - name: Argo Healthy signals await_deploy success
       condition: >
         event.payload.type is defined and
         event.payload.type == "argo_app_health" and
-        (event.payload.sync | default('') | lower) == "synced" and
-        (event.payload.health | default('') | lower) == "healthy"
+        event.payload.sync is defined and
+        event.payload.sync == "Synced" and
+        event.payload.health is defined and
+        event.payload.health == "Healthy"
       action:
         run_job_template:
           name: "SDLC Signal AO CI/CD Gate"
@@ -68,7 +84,7 @@
             extra_vars:
               gate_node_id: await_deploy
               decision: approved
-              guid: "{{ event.payload.guid | default(guid | default('')) }}"
+              guid: "{{ event.payload.guid | default(guid) }}"
               gitlab_path: "{{ event.payload.gitlab_path | default('') }}"
               ao_execution_id: "{{ event.payload.ao_execution_id | default('') }}"
               signal_source: argo_healthy
@@ -81,11 +97,9 @@
       condition: >
         event.payload.type is defined and
         event.payload.type == "argo_app_health" and
-        (
-          (event.payload.health | default('') | lower) in ["degraded", "missing"] or
-          (event.payload.sync | default('') | lower) in ["unknown"] or
-          (event.payload.phase | default('') | lower) in ["syncfailed", "failed"]
-        )
+        event.payload.health is defined and
+        (event.payload.health == "Degraded" or
+         event.payload.health == "Missing")
       action:
         run_job_template:
           name: "SDLC Signal AO CI/CD Gate"
@@ -94,7 +108,7 @@
             extra_vars:
               gate_node_id: await_deploy
               decision: rejected
-              guid: "{{ event.payload.guid | default(guid | default('')) }}"
+              guid: "{{ event.payload.guid | default(guid) }}"
               gitlab_path: "{{ event.payload.gitlab_path | default('') }}"
               ao_execution_id: "{{ event.payload.ao_execution_id | default('') }}"
               signal_source: argo_failed
@@ -103,8 +117,7 @@
               ao_client_secret: "{{ ao_client_secret }}"
               validate_certs: "{{ validate_certs | default(false) }}"
 
-    # Only Lightwell remediated artifacts (.rhlw-NNNNN). Unfiltered CREATED also
-    # matches transitive deps pulled during MR verify and re-triggers the pipeline.
+    # Only Lightwell remediated artifacts (.rhlw-NNNNN).
     - name: Nexus component created or vulnerability fix published
       condition: >
         (event.payload.action is defined and event.payload.action == "CREATED" and
@@ -117,8 +130,6 @@
           organization: "{{ aap_organization_name }}"
           job_args:
             extra_vars:
-              # Coerce component to {} — vulnerability_fix_published has no component key
-              # and strict undefined would fail before default() runs.
               artifact_name: "{{ (event.payload.component | default({})).name | default(event.payload.artifact_name | default('')) }}"
               artifact_group: "{{ (event.payload.component | default({})).group | default(event.payload.artifact_group | default('')) }}"
               artifact_version: "{{ (event.payload.component | default({})).version | default(event.payload.artifact_version | default('')) }}"
@@ -140,8 +151,6 @@
               opencode_base_url: "{{ opencode_base_url }}"
               opencode_server_username: "{{ opencode_server_username | default('opencode') }}"
               opencode_server_password: "{{ opencode_server_password }}"
-              # Must be listed — EDA job_args replace activation extra_vars rather than
-              # merging them. Omitting snow_* left Create SNOW with empty URLs (cng2l).
               snow_url: "{{ snow_url | default('') }}"
               snow_svc_url: "{{ snow_svc_url | default('') }}"
               gitlab_token: "{{ gitlab_token | default('') }}"
