@@ -453,9 +453,15 @@ def build_mr_description(
     if desc_txt:
         parts += [desc_txt, ""]
     parts += [
+        # Do not claim a signature here. The validation table two sections
+        # below reports an *integrity* check against the checksum Nexus
+        # records, because the tenant mirror publishes no detached
+        # signature. Saying "digitally signed" in the prose contradicts the
+        # table on the same page, and the table is the part a reviewer is
+        # being asked to trust.
         f"Red Hat Lightwell has backported the upstream fix directly to the `{new_version}` "
-        "release line. The remediated binary is digitally signed and ships a complete SBOM "
-        "attestation.",
+        "release line. The remediated build is published with checksums and a complete SBOM, "
+        "both verified below.",
         "",
         "## Automated Validation",
         "",
