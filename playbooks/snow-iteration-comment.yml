@@ -82,32 +82,41 @@
 
     - name: Build iteration comment
       ansible.builtin.set_fact:
+        # snow-mock UI renders a small Markdown subset + autolinks (escape-first).
         snow_comment_body: |
-          {{ _headline }}
+          ## {{ _headline }}
 
-          Policy: {{ approval | default('n/a') }}
-          Verifier: {{ verifier_status | default('n/a') }}
+          - **Policy:** `{{ approval | default('n/a') }}`
+          - **Verifier:** `{{ verifier_status | default('n/a') }}`
           {% if (_iid | default('') | string | length) > 0 and (_iid | default(0) | int) > 0 -%}
-          MR: !{{ _iid }}{% if (_mr_url | default('') | length) > 0 %} — {{ _mr_url }}{% endif %}
+          {% if (_mr_url | default('') | length) > 0 -%}
+          - **MR:** [!{{ _iid }}]({{ _mr_url }})
+          {% else -%}
+          - **MR:** !{{ _iid }}
+          {% endif -%}
           {% endif -%}
           {% if (_oc_ui | default('') | length) > 0 -%}
-          OpenCode: {{ _oc_ui }}
+          - **OpenCode:** [session]({{ _oc_ui }})
           {% elif (opencode_session_id | default('') | length) > 0 -%}
-          OpenCode session: {{ opencode_session_id }}
+          - **OpenCode session:** `{{ opencode_session_id }}`
           {% endif -%}
           {% if (opencode_session_title | default('') | length) > 0 -%}
-          Agent: {{ opencode_session_title }}
+          - **Agent:** {{ opencode_session_title }}
           {% endif -%}
           {% if (_oc_summary | default('') | length) > 0 -%}
 
-          --- agent summary ---
+          ---
+
+          ### Agent summary
+
           {{ _oc_summary }}
           {% endif -%}
           {% if (_outcome | default('')) in ['build_failed', 'deploy_failed'] -%}
-          Next: manual verify (CI/CD gate rejected or timed out)
+
+          **Next:** manual verify (CI/CD gate rejected or timed out)
           {% endif -%}
-          Parent: {{ parent_incident | default('n/a') }}
-          guid: {{ guid | default('') }}
+
+          Parent: `{{ parent_incident | default('n/a') }}` · guid: `{{ guid | default('') }}`
 
     - name: POST comment on child (or legacy) incident
       ansible.builtin.uri:

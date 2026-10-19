@@ -139,29 +139,35 @@
 
     - name: Build lifecycle comment
       ansible.builtin.set_fact:
+        # snow-mock UI: Markdown subset + autolink (escape-first).
         snow_comment_body: |
-          {{ _headline }}
+          ## {{ _headline }}
 
           {% if (_iid | default('') | string | length) > 0 and (_iid | default(0) | int) > 0 -%}
-          MR: !{{ _iid }}{% if (_mr_url | default('') | length) > 0 %} — {{ _mr_url }}{% endif %}
+          {% if (_mr_url | default('') | length) > 0 -%}
+          - **MR:** [!{{ _iid }}]({{ _mr_url }})
+          {% else -%}
+          - **MR:** !{{ _iid }}
+          {% endif -%}
           {% endif -%}
           {% if (_build | default('') | length) > 0 -%}
-          Build: {{ _build }}{% if (_sha | default('') | length) > 0 %} ({{ _sha[:12] }}){% endif %}
+          - **Build:** `{{ _build }}`{% if (_sha | default('') | length) > 0 %} (`{{ _sha[:12] }}`){% endif %}
           {% endif -%}
           {% if (_build_url | default('') | length) > 0 -%}
-          Pipeline: {{ _build_url }}
+          - **Pipeline:** [open run]({{ _build_url }})
           {% endif -%}
           {% if (_health | default('') | length) > 0 -%}
-          Deploy health: {{ _health }}
+          - **Deploy health:** `{{ _health }}`
           {% endif -%}
           {% if (opencode_session_ui_url | default('', true) | length) > 0 -%}
-          OpenCode: {{ opencode_session_ui_url }}
+          - **OpenCode:** [session]({{ opencode_session_ui_url }})
           {% endif -%}
           {% if (_outcome | default('')) in ['build_failed', 'deploy_failed'] -%}
-          Next: manual verify (build/deploy failed)
+
+          **Next:** manual verify (build/deploy failed)
           {% endif -%}
-          Source: {{ signal_source | default('eda') }}
-          guid: {{ guid | default('') }}
+
+          Source: `{{ signal_source | default('eda') }}` · guid: `{{ guid | default('') }}`
       when: (_target | default('') | length) > 0
 
     - name: POST comment on matched incident
