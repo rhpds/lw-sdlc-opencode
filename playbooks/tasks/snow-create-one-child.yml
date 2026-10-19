@@ -33,6 +33,7 @@
       state: New
       parent_incident: "{{ _parent }}"
       cmdb_ci: "{{ ao_app.gitlab_path | default('') }}"
+      guid: "{{ guid | default('') }}"
     status_code: [201]
     validate_certs: "{{ validate_certs | default(false) }}"
   register: snow_child_create

@@ -47,6 +47,7 @@
           subcategory: Application
           channel: Monitoring
           state: New
+          guid: "{{ guid | default('') }}"
         status_code: [201]
         validate_certs: "{{ validate_certs | default(false) }}"
       register: snow_create

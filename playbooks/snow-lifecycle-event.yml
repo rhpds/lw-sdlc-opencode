@@ -21,34 +21,62 @@
         _target: "{{ child_incident | default(snow_incident | default(''), true) }}"
         _parent: "{{ parent_incident | default('', true) }}"
 
-    - name: List open incidents when target unknown
+    # Prefer server-side filters (cmdb_ci + guid). Fall back to short_description
+    # scan only if the mock is older than those query params.
+    - name: Build lifecycle lookup URL
+      ansible.builtin.set_fact:
+        _snow_lookup_url: >-
+          {{ snow_base | regex_replace('/$', '') }}/api/v1/incidents?cmdb_ci={{ gitlab_path | urlencode }}{%
+            if (guid | default('') | length) > 0
+          %}&guid={{ guid | urlencode }}{% endif %}&open_only=1&limit=5&sort_by=opened_at&sort_order=desc
+      when: (_target | default('') | length) == 0
+
+    - name: Look up child by cmdb_ci (and guid when known)
       ansible.builtin.uri:
-        url: "{{ snow_base | regex_replace('/$', '') }}/api/v1/incidents?open_only=1&limit=200"
+        url: "{{ _snow_lookup_url | regex_replace(' ', '') }}"
         method: GET
         status_code: [200]
         validate_certs: "{{ validate_certs | default(false) }}"
       register: snow_list
       when: (_target | default('') | length) == 0
 
-    - name: Match child by cmdb_ci or short_description containing gitlab_path
+    - name: Take newest cmdb_ci match
       ansible.builtin.set_fact:
         _match: >-
           {{
             (snow_list.json.result | default(snow_list.json.incidents | default([])))
-            | selectattr('cmdb_ci', 'defined')
-            | selectattr('cmdb_ci', 'equalto', gitlab_path)
-            | list
             | first
-            | default(
-                (snow_list.json.result | default(snow_list.json.incidents | default([])))
-                | selectattr('short_description', 'defined')
-                | selectattr('short_description', 'search', gitlab_path)
-                | list
-                | first
-                | default({})
-              )
+            | default({})
           }}
       when: (_target | default('') | length) == 0
+
+    - name: Fallback — open list + short_description contains gitlab_path
+      ansible.builtin.uri:
+        url: "{{ snow_base | regex_replace('/$', '') }}/api/v1/incidents?open_only=1&limit=200"
+        method: GET
+        status_code: [200]
+        validate_certs: "{{ validate_certs | default(false) }}"
+      register: snow_list_fb
+      when:
+        - (_target | default('') | length) == 0
+        - (_match | default({}) | length) == 0
+
+    - name: Match child via short_description fallback
+      ansible.builtin.set_fact:
+        _match: >-
+          {{
+            (snow_list_fb.json.result | default(snow_list_fb.json.incidents | default([])))
+            | selectattr('short_description', 'defined')
+            | selectattr('short_description', 'search', gitlab_path)
+            | list
+            | first
+            | default({})
+          }}
+      when:
+        - (_target | default('') | length) == 0
+        - (_match | default({}) | length) == 0
+        - snow_list_fb is defined
+        - snow_list_fb is succeeded
 
     - name: Apply matched incident
       ansible.builtin.set_fact:
