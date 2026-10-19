@@ -16,16 +16,18 @@
     - name: Build incident description
       ansible.builtin.set_fact:
         _snow_short: >-
-          Lightwell remediation arrived — {{ cve_id | default('unknown') }}
+          Parent — Lightwell remediation — {{ cve_id | default('unknown') }}
           {{ artifact_group | default('') }}:{{ artifact_name | default(package_purl | default('')) }}
         _snow_desc: |
-          Lightwell AO remediation run started.
+          Lightwell AO remediation run started (parent incident).
+          Per-app work lands on child incidents after classify.
           guid: {{ guid | default('') }}
           CVE: {{ cve_id | default('unknown') }}
           package: {{ package_purl | default(artifact_name | default('')) }}
           vulnerable: {{ vulnerable_version | default('') }}
           fix: {{ fix_version | default(artifact_version | default('')) }}
           severity: {{ severity | default('medium') }}
+
 
     - name: POST incident to snow-mock
       ansible.builtin.uri:
@@ -49,13 +51,15 @@
         validate_certs: "{{ validate_certs | default(false) }}"
       register: snow_create
 
-    - name: Export snow_incident for AO
+    - name: Export parent incident for AO
       ansible.builtin.set_stats:
         data:
+          parent_incident: "{{ snow_create.json.result.number }}"
+          # Alias kept so older canvas nodes still resolve snow_incident.
           snow_incident: "{{ snow_create.json.result.number }}"
           snow_incident_sys: "{{ snow_create.json.result }}"
         per_host: false
 
-    - name: Show created incident
+    - name: Show created parent incident
       ansible.builtin.debug:
-        msg: "Created {{ snow_create.json.result.number }}"
+        msg: "Created parent {{ snow_create.json.result.number }}"

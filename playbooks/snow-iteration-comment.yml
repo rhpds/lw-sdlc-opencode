@@ -7,12 +7,17 @@
     snow_base: "{{ snow_svc_url | default(snow_url | default(''), true) }}"
 
   tasks:
+    - name: Resolve child vs parent incident target
+      ansible.builtin.set_fact:
+        # Prefer per-app child; fall back to snow_incident (legacy single-INC).
+        _target_incident: "{{ child_incident | default(snow_incident | default(''), true) }}"
+
     - name: Require incident
       ansible.builtin.assert:
         that:
           - (snow_base | default('') | length) > 0
-          - (snow_incident | default('') | length) > 0
-        fail_msg: "snow_base and snow_incident are required"
+          - (_target_incident | default('') | length) > 0
+        fail_msg: "snow_base and child_incident (or snow_incident) are required"
 
     - name: Build iteration comment
       ansible.builtin.set_fact:
@@ -22,11 +27,12 @@
           - outcome: {{ iteration_outcome | default('unknown') }}
           - verifier: {{ verifier_status | default('n/a') }}
           - MR: !{{ merge_request_iid | default('n/a') }}
+          - parent: {{ parent_incident | default('n/a') }}
           - guid: {{ guid | default('') }}
 
-    - name: POST comment
+    - name: POST comment on child (or legacy) incident
       ansible.builtin.uri:
-        url: "{{ snow_base | regex_replace('/$', '') }}/api/v1/incidents/{{ snow_incident }}/comments"
+        url: "{{ snow_base | regex_replace('/$', '') }}/api/v1/incidents/{{ _target_incident }}/comments"
         method: POST
         body_format: json
         body:
@@ -39,6 +45,8 @@
     - name: Export artifacts
       ansible.builtin.set_stats:
         data:
-          snow_incident: "{{ snow_incident }}"
+          snow_incident: "{{ _target_incident }}"
+          child_incident: "{{ _target_incident }}"
+          parent_incident: "{{ parent_incident | default('') }}"
           iteration_outcome: "{{ iteration_outcome | default('commented') }}"
         per_host: false

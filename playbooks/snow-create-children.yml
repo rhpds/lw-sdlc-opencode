@@ -1,0 +1,68 @@
+---
+# After classify: one child INC per AO-eligible app, linked to the parent.
+# Enriches ao_apps with child_incident for the for-each loop.
+- name: Create ServiceNow child incidents for AO apps
+  hosts: localhost
+  gather_facts: false
+  vars:
+    snow_base: "{{ snow_svc_url | default(snow_url | default(''), true) }}"
+
+  tasks:
+    - name: Require parent and ao_apps
+      ansible.builtin.assert:
+        that:
+          - (snow_base | default('') | length) > 0
+          - (parent_incident | default(snow_incident | default('')) | length) > 0
+          - (ao_apps | default([]) | length) > 0
+        fail_msg: "snow_base, parent_incident (or snow_incident), and ao_apps are required"
+
+    - name: Resolve parent incident number
+      ansible.builtin.set_fact:
+        _parent: "{{ parent_incident | default(snow_incident) }}"
+
+    - name: Init enriched app list
+      ansible.builtin.set_fact:
+        ao_apps_with_children: []
+
+    - name: Create child incident for each AO app
+      ansible.builtin.include_tasks: tasks/snow-create-one-child.yml
+      loop: "{{ ao_apps }}"
+      loop_control:
+        loop_var: ao_app
+
+    - name: Build parent comment listing children
+      ansible.builtin.set_fact:
+        snow_comment_body: |
+          Child incidents created for AO remediation (guid={{ guid | default('') }}):
+          {% for a in ao_apps_with_children %}
+          - {{ a.child_incident }} — {{ a.gitlab_path }} (approval={{ a.approval }})
+          {% endfor %}
+          Renovate skips (no child):
+          {% for r in renovate_skips | default([]) %}
+          - {{ r.gitlab_path }}
+          {% else %}
+          - (none)
+          {% endfor %}
+
+    - name: Comment parent with child list
+      ansible.builtin.uri:
+        url: "{{ snow_base | regex_replace('/$', '') }}/api/v1/incidents/{{ _parent }}/comments"
+        method: POST
+        body_format: json
+        body:
+          body: "{{ snow_comment_body }}"
+          created_by: "{{ snow_created_by | default('Lightwell AO') }}"
+          type: additional_comments
+        status_code: [201]
+        validate_certs: "{{ validate_certs | default(false) }}"
+
+    - name: Export enriched ao_apps for AO for-each
+      ansible.builtin.set_stats:
+        data:
+          parent_incident: "{{ _parent }}"
+          snow_incident: "{{ _parent }}"
+          ao_apps: "{{ ao_apps_with_children }}"
+          snow_comment_body: "{{ snow_comment_body }}"
+          package_info: "{{ package_info | default({}) }}"
+          renovate_skips: "{{ renovate_skips | default([]) }}"
+        per_host: false
