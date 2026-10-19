@@ -1,0 +1,69 @@
+---
+# Build Argo / OpenShift Route / console project URLs for SNOW comments.
+# Requires optional: argo_cd_url, argo_app, argo_app_namespace, gitlab_path,
+#                    guid, apps_domain, apps_namespace, openshift_console_url
+# Exports: argo_app_url, app_route_url, console_ns_url, app_slug
+
+- name: Derive app slug from gitlab_path
+  ansible.builtin.set_fact:
+    app_slug: >-
+      {{
+        (gitlab_path | default('') | trim).split('/')[-1]
+        if (gitlab_path | default('') | length) > 0
+        else ''
+      }}
+
+- name: Resolve Argo CD Application URL
+  ansible.builtin.set_fact:
+    argo_app_url: >-
+      {{
+        (
+          (argo_cd_url | default('', true) | regex_replace('/$', ''))
+          + '/applications/'
+          + (argo_app_namespace | default('openshift-gitops', true))
+          + '/'
+          + (
+              argo_app | default('', true)
+              if (argo_app | default('', true) | length) > 0
+              else ('acme-apps-' + (guid | default('')))
+            )
+        )
+        if (argo_cd_url | default('', true) | length) > 0
+        else ''
+      }}
+
+- name: Resolve OpenShift app Route URL
+  ansible.builtin.set_fact:
+    app_route_url: >-
+      {{
+        (
+          'https://'
+          + app_slug
+          + '-'
+          + (guid | default(''))
+          + '.'
+          + (apps_domain | default('', true))
+        )
+        if (
+          (app_slug | default('') | length) > 0
+          and (guid | default('') | length) > 0
+          and (apps_domain | default('', true) | length) > 0
+        )
+        else (app_route_url | default('', true))
+      }}
+
+- name: Resolve OpenShift console project URL
+  ansible.builtin.set_fact:
+    console_ns_url: >-
+      {{
+        (
+          (openshift_console_url | default('', true) | regex_replace('/$', ''))
+          + '/k8s/cluster/projects/'
+          + (apps_namespace | default('', true))
+        )
+        if (
+          (openshift_console_url | default('', true) | length) > 0
+          and (apps_namespace | default('', true) | length) > 0
+        )
+        else (console_ns_url | default('', true))
+      }}

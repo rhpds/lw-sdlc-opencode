@@ -1,10 +1,21 @@
 ---
 # Create one child INC for ao_app under _parent; append to ao_apps_with_children.
+- name: Derive child labels
+  ansible.builtin.set_fact:
+    _app_path: "{{ ao_app.gitlab_path | default('unknown') }}"
+    _app_slug: "{{ (ao_app.gitlab_path | default('unknown')).split('/')[-1] }}"
+    _approval: "{{ ao_app.approval | default('needs_approval') }}"
+    _cve: "{{ cve_id | default('unknown') }}"
+    _pkg: "{{ package_purl | default(artifact_name | default('n/a')) }}"
+    _vuln: "{{ vulnerable_version | default('n/a') }}"
+    _fix: "{{ fix_version | default(artifact_version | default('n/a')) }}"
+    _sev: "{{ severity | default('medium') }}"
+
 - name: Build child short description
   ansible.builtin.set_fact:
     _child_short: >-
-      AO app — {{ ao_app.gitlab_path | default('unknown') }} —
-      {{ cve_id | default('remediation') }}
+      [{{ _cve }}] {{ _app_slug }} ({{ _approval }}) — {{ _pkg }}
+      {{ _vuln }} → {{ _fix }}
 
 - name: POST child incident
   ansible.builtin.uri:
@@ -14,13 +25,32 @@
     body:
       short_description: "{{ _child_short | truncate(160, true, '') }}"
       description: |
-        Child of {{ _parent }} for Lightwell AO remediation.
-        app: {{ ao_app.gitlab_path | default('') }}
-        approval: {{ ao_app.approval | default('') }}
-        remediation_owner: {{ ao_app.remediation_owner | default('ao') }}
-        guid: {{ guid | default('') }}
-        CVE: {{ cve_id | default('unknown') }}
-        package: {{ package_purl | default(artifact_name | default('')) }}
+        ## AO remediation — {{ _app_slug }}
+
+        Child of parent **{{ _parent }}** for Lightwell Automation Orchestrator.
+
+        ### Application
+
+        - **GitLab path:** `{{ _app_path }}`
+        - **CMDB CI:** `{{ _app_path }}`
+        - **Approval policy:** `{{ _approval }}`
+        - **Remediation owner:** `{{ ao_app.remediation_owner | default('ao') }}`
+
+        ### Advisory
+
+        - **CVE:** `{{ _cve }}`
+        - **Severity:** `{{ _sev }}`
+        - **Package:** `{{ _pkg }}`
+        - **Vulnerable → fix:** `{{ _vuln }}` → `{{ _fix }}`
+
+        ### Expected flow
+
+        1. Impact Analyzer opens remediation MR
+        2. MR Verifier checks the change
+        3. {% if _approval == 'auto_approve' %}AO merges automatically{% else %}Student merges in GitLab (`needs_approval`){% endif %}
+        4. PaC build → Argo deploy → Activity updates on this INC
+
+        **guid:** `{{ guid | default('') }}`
       caller_id: "{{ snow_caller_id | default('lightwell.ao@example.com') }}"
       created_by: "{{ snow_created_by | default('Lightwell AO') }}"
       opened_by: "{{ snow_created_by | default('Lightwell AO') }}"

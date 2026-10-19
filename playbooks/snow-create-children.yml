@@ -30,27 +30,32 @@
       loop_control:
         loop_var: ao_app
 
-    - name: Build parent comment listing children
-      ansible.builtin.set_fact:
-        snow_comment_body: |
-          Child incidents created for AO remediation (guid={{ guid | default('') }}):
-          {% for a in ao_apps_with_children %}
-          - {{ a.child_incident }} — {{ a.gitlab_path }} (approval={{ a.approval }})
-          {% endfor %}
-          Renovate skips (no child):
-          {% for r in renovate_skips | default([]) %}
-          - {{ r.gitlab_path }}
-          {% else %}
-          - (none)
-          {% endfor %}
-
-    - name: Comment parent with child list
+    - name: Post parent status with child ticket links
       ansible.builtin.uri:
         url: "{{ snow_base | regex_replace('/$', '') }}/api/v1/incidents/{{ _parent }}/comments"
         method: POST
         body_format: json
         body:
-          body: "{{ snow_comment_body }}"
+          body: |
+            ## Child tickets opened
+
+            Blast-radius classify finished. One child incident was opened per
+            AO-owned app — open those tickets for remediation progress (MR, build, deploy).
+
+            ### Child ticket(s)
+            {% for a in ao_apps_with_children %}
+            - **{{ a.child_incident }}** — `{{ a.gitlab_path }}` · `{{ a.approval }}`{% if (snow_url | default('') | length) > 0 %} — [open child]({{ snow_url | regex_replace('/$', '') }}/#incidents/{{ a.child_incident }}){% endif %}
+            {% else %}
+            - _(none)_
+            {% endfor %}
+            {% if (renovate_skips | default([]) | length) > 0 %}
+
+            Renovate skips (no child): {% for r in renovate_skips %}`{{ r.gitlab_path }}`{% if not loop.last %}, {% endif %}{% endfor %}.
+            {% endif %}
+
+            ---
+
+            Parent: `{{ _parent }}` · guid: `{{ guid | default('') }}`
           created_by: "{{ snow_created_by | default('Lightwell AO') }}"
           type: additional_comments
         status_code: [201]

@@ -123,35 +123,88 @@
           }}
         _build_url: "{{ build_url | default(pac_target_url | default('', true), true) }}"
 
-    - name: Headline by outcome
+    - name: Headline + plain-English blurb by outcome
       ansible.builtin.set_fact:
+        _app: "{{ (_path | default('app')).split('/')[-1] }}"
         _headline: >-
           {{
             {
-              'merged': 'GitLab MR merged — ' + _path,
-              'build_succeeded': 'PaC build succeeded — ' + _path,
-              'build_failed': 'PaC build failed — ' + _path,
-              'deployed': 'ArgoCD deploy Healthy — ' + _path,
-              'deploy_failed': 'ArgoCD deploy not Healthy — ' + _path,
-            }[_outcome] | default('Lifecycle update — ' + _path + ' (' + _outcome + ')')
+              'merged': 'Merge request merged',
+              'build_succeeded': 'Build succeeded',
+              'build_failed': 'Build failed',
+              'deployed': 'Application deployed',
+              'deploy_failed': 'Deploy not healthy',
+            }[_outcome] | default('Lifecycle update')
+          }}
+        _plain: >-
+          {{
+            {
+              'merged': (
+                'The remediation merge request for **'
+                + ((_path | default('app')).split('/')[-1])
+                + '** was merged into the default branch. A Pipelines as Code '
+                + 'build should start next; this incident will get another update when CI finishes.'
+              ),
+              'build_succeeded': (
+                'Good news — the Pipelines as Code build for **'
+                + ((_path | default('app')).split('/')[-1])
+                + '** completed successfully. The remediated image is available '
+                + 'and Argo CD can sync it to the cluster.'
+              ),
+              'build_failed': (
+                'The Pipelines as Code build for **'
+                + ((_path | default('app')).split('/')[-1])
+                + '** did not succeed. Check the pipeline link below, fix the '
+                + 'failure, and re-run or open a follow-up before closing this incident.'
+              ),
+              'deployed': (
+                '**'
+                + ((_path | default('app')).split('/')[-1])
+                + '** is now **Healthy** in Argo CD. The remediated version is '
+                + 'live — use the app Route or OpenShift project links below to verify.'
+              ),
+              'deploy_failed': (
+                'Argo CD reports **'
+                + ((_path | default('app')).split('/')[-1])
+                + '** is not Healthy. Review the Application status and cluster '
+                + 'workloads before retrying or escalating.'
+              ),
+            }[_outcome] | default(
+              'Lifecycle update for **'
+              + ((_path | default('app')).split('/')[-1])
+              + '** (`'
+              + _outcome
+              + '`).'
+            )
           }}
       when: (_target | default('') | length) > 0
 
+    - name: Resolve Argo / Route / console links
+      ansible.builtin.import_tasks: tasks/resolve-deploy-links.yml
+      when:
+        - (_target | default('') | length) > 0
+        - (_outcome | default('')) in ['deployed', 'deploy_failed']
+
     - name: Build lifecycle comment
       ansible.builtin.set_fact:
-        # snow-mock UI: Markdown subset + autolink (escape-first).
+        # Plain English first; details/links second (snow-mock Markdown).
         snow_comment_body: |
-          ## {{ _headline }}
+          ## {{ _headline }} — {{ _app }}
 
+          {{ _plain }}
+
+          ### Details
+
+          - **Application:** `{{ _path }}`
           {% if (_iid | default('') | string | length) > 0 and (_iid | default(0) | int) > 0 -%}
           {% if (_mr_url | default('') | length) > 0 -%}
-          - **MR:** [!{{ _iid }}]({{ _mr_url }})
+          - **Merge request:** [!{{ _iid }}]({{ _mr_url }})
           {% else -%}
-          - **MR:** !{{ _iid }}
+          - **Merge request:** !{{ _iid }}
           {% endif -%}
           {% endif -%}
           {% if (_build | default('') | length) > 0 -%}
-          - **Build:** `{{ _build }}`{% if (_sha | default('') | length) > 0 %} (`{{ _sha[:12] }}`){% endif %}
+          - **Build status:** `{{ _build }}`{% if (_sha | default('') | length) > 0 %} (commit `{{ _sha[:12] }}`){% endif %}
           {% endif -%}
           {% if (_build_url | default('') | length) > 0 -%}
           - **Pipeline:** [open run]({{ _build_url }})
@@ -159,13 +212,24 @@
           {% if (_health | default('') | length) > 0 -%}
           - **Deploy health:** `{{ _health }}`
           {% endif -%}
+          {% if (argo_app_url | default('', true) | length) > 0 -%}
+          - **Argo CD:** [{{ argo_app | default('application') }}]({{ argo_app_url }})
+          {% endif -%}
+          {% if (_outcome | default('')) == 'deployed' and (app_route_url | default('', true) | length) > 0 -%}
+          - **App Route:** [open application]({{ app_route_url }})
+          {% endif -%}
+          {% if (_outcome | default('')) == 'deployed' and (console_ns_url | default('', true) | length) > 0 -%}
+          - **OpenShift console:** [project {{ apps_namespace | default('') }}]({{ console_ns_url }})
+          {% endif -%}
           {% if (opencode_session_ui_url | default('', true) | length) > 0 -%}
-          - **OpenCode:** [session]({{ opencode_session_ui_url }})
+          - **OpenCode:** [agent session]({{ opencode_session_ui_url }})
           {% endif -%}
           {% if (_outcome | default('')) in ['build_failed', 'deploy_failed'] -%}
 
-          **Next:** manual verify (build/deploy failed)
+          **What to do next:** investigate the failure using the links above, then re-run or escalate.
           {% endif -%}
+
+          ---
 
           Source: `{{ signal_source | default('eda') }}` · guid: `{{ guid | default('') }}`
       when: (_target | default('') | length) > 0
@@ -182,6 +246,44 @@
         status_code: [201]
         validate_certs: "{{ validate_certs | default(false) }}"
       when: (_target | default('') | length) > 0
+
+    # Parent gets a short rollup only (link to child). Full narrative stays above.
+    - name: Parent rollup copy for this outcome
+      ansible.builtin.set_fact:
+        parent_status_headline: >-
+          {{
+            {
+              'merged': 'Merged workflow — MR merged',
+              'build_succeeded': 'Merged workflow — build succeeded',
+              'build_failed': 'Merged workflow — build failed',
+              'deployed': 'Deploy workflow — Healthy',
+              'deploy_failed': 'Deploy workflow — not Healthy',
+            }[_outcome] | default('Lifecycle workflow update')
+          }}
+        parent_status_plain: >-
+          {{
+            {
+              'merged': 'Remediation MR merged for **' + _app + '**. Details are on the child ticket.',
+              'build_succeeded': 'CI build succeeded for **' + _app + '**. Details and pipeline link are on the child ticket.',
+              'build_failed': 'CI build failed for **' + _app + '**. See the child ticket for the pipeline and next steps.',
+              'deployed': 'Argo deploy is Healthy for **' + _app + '**. Open the child ticket for Argo / Route / console links.',
+              'deploy_failed': 'Argo deploy is not Healthy for **' + _app + '**. See the child ticket for details.',
+            }[_outcome] | default('Update for **' + _app + '**. See the child ticket for details.')
+          }}
+        child_incident: "{{ _target }}"
+      when:
+        - (_parent | default('') | length) > 0
+        - (_target | default('') | length) > 0
+        - (_outcome | default('')) in ['merged', 'build_succeeded', 'build_failed', 'deployed', 'deploy_failed']
+        - parent_status_comment | default(true) | bool
+
+    - name: Post brief status on parent with child link
+      ansible.builtin.import_tasks: tasks/snow-parent-status.yml
+      when:
+        - (_parent | default('') | length) > 0
+        - (_target | default('') | length) > 0
+        - (_outcome | default('')) in ['merged', 'build_succeeded', 'build_failed', 'deployed', 'deploy_failed']
+        - parent_status_comment | default(true) | bool
 
     - name: Export artifacts
       ansible.builtin.set_stats:

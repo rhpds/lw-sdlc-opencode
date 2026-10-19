@@ -31,6 +31,8 @@
           status: "{{ status | default('') }}"
           sync: "{{ sync | default('') }}"
           health: "{{ health | default('') }}"
+          argo_app: "{{ argo_app | default('') }}"
+          revision: "{{ revision | default('') }}"
           approval: "{{ approval | default('') }}"
           child_incident: "{{ child_incident | default('') }}"
           parent_incident: "{{ parent_incident | default('') }}"

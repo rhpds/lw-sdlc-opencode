@@ -45,19 +45,69 @@
             )
           }}
 
-    - name: Headline by outcome
+    - name: Headline + plain-English blurb by outcome
       ansible.builtin.set_fact:
+        _app: "{{ (_path | default('app')).split('/')[-1] }}"
         _headline: >-
           {{
             {
-              'awaiting_merge': 'Remediation MR ready for review — ' + _path,
-              'merged': 'Remediation MR auto-merged — ' + _path,
-              'already_current': 'No remediation needed — ' + _path + ' already current',
-              'verifier_fail': 'Verifier rejected remediation — ' + _path,
-              'mr_opened': 'Remediation MR opened — ' + _path,
-              'build_failed': 'Build failed after remediation — ' + _path,
-              'deploy_failed': 'Deploy failed after remediation — ' + _path,
-            }[_outcome] | default('Iteration update — ' + _path + ' (' + _outcome + ')')
+              'awaiting_merge': 'Remediation ready for review',
+              'merged': 'Remediation merged automatically',
+              'already_current': 'Already on the remediated version',
+              'verifier_fail': 'Verifier rejected the change',
+              'mr_opened': 'Remediation merge request opened',
+              'build_failed': 'Build failed after remediation',
+              'deploy_failed': 'Deploy failed after remediation',
+            }[_outcome] | default('Remediation update')
+          }}
+        _plain: >-
+          {{
+            {
+              'awaiting_merge': (
+                'A remediation merge request for **'
+                + ((_path | default('app')).split('/')[-1])
+                + '** is ready. Policy is **needs_approval** — please review '
+                + 'and merge in GitLab when you are satisfied; CI/CD will continue from there.'
+              ),
+              'merged': (
+                'The remediation merge request for **'
+                + ((_path | default('app')).split('/')[-1])
+                + '** was **auto-merged** after the verifier passed '
+                + '(policy **auto_approve**). Build and deploy updates will follow on this incident.'
+              ),
+              'already_current': (
+                '**'
+                + ((_path | default('app')).split('/')[-1])
+                + '** already has the remediated dependency on its default branch. '
+                + 'No merge request was opened for this app.'
+              ),
+              'verifier_fail': (
+                'The MR verifier did **not** accept the remediation for **'
+                + ((_path | default('app')).split('/')[-1])
+                + '**. Review the OpenCode session / MR before retrying.'
+              ),
+              'mr_opened': (
+                'Impact Analyzer opened a remediation merge request for **'
+                + ((_path | default('app')).split('/')[-1])
+                + '**. Next steps depend on the approval policy for this app.'
+              ),
+              'build_failed': (
+                'CI failed after the remediation for **'
+                + ((_path | default('app')).split('/')[-1])
+                + '**. Manual verification is needed before closing this incident.'
+              ),
+              'deploy_failed': (
+                'Deploy did not become Healthy for **'
+                + ((_path | default('app')).split('/')[-1])
+                + '**. Check Argo CD and the cluster before closing this incident.'
+              ),
+            }[_outcome] | default(
+              'Update for **'
+              + ((_path | default('app')).split('/')[-1])
+              + '** (`'
+              + _outcome
+              + '`).'
+            )
           }}
 
     - name: Resolve OpenCode UI deep link
@@ -82,39 +132,44 @@
 
     - name: Build iteration comment
       ansible.builtin.set_fact:
-        # snow-mock UI renders a small Markdown subset + autolinks (escape-first).
+        # Plain English first; policy/links/agent summary second.
         snow_comment_body: |
-          ## {{ _headline }}
+          ## {{ _headline }} — {{ _app }}
 
-          - **Policy:** `{{ approval | default('n/a') }}`
+          {{ _plain }}
+
+          ### Details
+
+          - **Application:** `{{ _path }}`
+          - **Approval policy:** `{{ approval | default('n/a') }}`
           - **Verifier:** `{{ verifier_status | default('n/a') }}`
           {% if (_iid | default('') | string | length) > 0 and (_iid | default(0) | int) > 0 -%}
           {% if (_mr_url | default('') | length) > 0 -%}
-          - **MR:** [!{{ _iid }}]({{ _mr_url }})
+          - **Merge request:** [!{{ _iid }}]({{ _mr_url }})
           {% else -%}
-          - **MR:** !{{ _iid }}
+          - **Merge request:** !{{ _iid }}
           {% endif -%}
           {% endif -%}
           {% if (_oc_ui | default('') | length) > 0 -%}
-          - **OpenCode:** [session]({{ _oc_ui }})
+          - **OpenCode:** [agent session]({{ _oc_ui }})
           {% elif (opencode_session_id | default('') | length) > 0 -%}
           - **OpenCode session:** `{{ opencode_session_id }}`
           {% endif -%}
           {% if (opencode_session_title | default('') | length) > 0 -%}
-          - **Agent:** {{ opencode_session_title }}
+          - **Agent title:** {{ opencode_session_title }}
           {% endif -%}
           {% if (_oc_summary | default('') | length) > 0 -%}
 
-          ---
-
-          ### Agent summary
+          ### What the agent reported
 
           {{ _oc_summary }}
           {% endif -%}
           {% if (_outcome | default('')) in ['build_failed', 'deploy_failed'] -%}
 
-          **Next:** manual verify (CI/CD gate rejected or timed out)
+          **What to do next:** investigate using the links above, then re-run or escalate.
           {% endif -%}
+
+          ---
 
           Parent: `{{ parent_incident | default('n/a') }}` · guid: `{{ guid | default('') }}`
 

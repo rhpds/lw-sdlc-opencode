@@ -1,6 +1,7 @@
 ---
-# Parent rollup after AO for-each complete. Lists children; closes parent.
-# Children are not closed as deploy-success here (CI/CD gates land in later tasks).
+# After Deploy Healthy: resolve the parent INC. The brief "Deploy finished"
+# status + child link was already posted by snow-lifecycle-event (deployed).
+# Do not dump Argo/Route details here — those stay on the child.
 - name: Finalize ServiceNow parent incident after remediation run
   hosts: localhost
   gather_facts: false
@@ -28,29 +29,6 @@
         validate_certs: "{{ validate_certs | default(false) }}"
       register: snow_parent_get
 
-    - name: Build parent rollup comment
-      ansible.builtin.set_fact:
-        _children: "{{ snow_parent_get.json.result.child_incidents | default([]) }}"
-        _final_body: |
-          {{ snow_comment_body | default('Lightwell AO multi-app remediation finished.') }}
-          guid={{ guid | default('') }}
-          parent={{ _parent }}
-          children={{ (snow_parent_get.json.result.child_incidents | default([])) | join(', ') or '(none)' }}
-          Per-app outcomes are on each child incident. Deploy-success close of children
-          is gated separately when CI/CD Approval signals are wired.
-
-    - name: Post parent rollup comment
-      ansible.builtin.uri:
-        url: "{{ snow_base | regex_replace('/$', '') }}/api/v1/incidents/{{ _parent }}/comments"
-        method: POST
-        body_format: json
-        body:
-          body: "{{ _final_body }}"
-          created_by: "{{ snow_created_by | default('Lightwell AO') }}"
-          type: additional_comments
-        status_code: [201]
-        validate_certs: "{{ validate_certs | default(false) }}"
-
     - name: PATCH parent state
       ansible.builtin.uri:
         url: "{{ snow_base | regex_replace('/$', '') }}/api/v1/incidents/{{ _parent }}"
@@ -59,7 +37,9 @@
         body:
           state: "{{ _snow_final_state }}"
           resolution_code: "{{ snow_resolution_code | default('Solved (Permanently)') }}"
-          resolution_notes: "{{ _final_body }}"
+          resolution_notes: >-
+            Deploy Healthy for {{ gitlab_path | default('app') }}
+            (guid={{ guid | default('') }}). Per-app detail is on child incident(s).
           resolved_by: "{{ snow_created_by | default('Lightwell AO') }}"
         status_code: [200]
         validate_certs: "{{ validate_certs | default(false) }}"
@@ -70,6 +50,6 @@
         data:
           parent_incident: "{{ _parent }}"
           snow_incident: "{{ _parent }}"
-          child_incidents: "{{ _children | default([]) }}"
+          child_incidents: "{{ snow_parent_get.json.result.child_incidents | default([]) }}"
           snow_final_state: "{{ _snow_final_state if (close_parent | default(true) | bool) else 'open' }}"
         per_host: false

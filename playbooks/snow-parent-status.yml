@@ -1,0 +1,27 @@
+---
+# Standalone JT: brief parent rollup when a workflow finishes.
+# Used by AO Start (loop complete). Detail lives on child INCs.
+- name: Post parent workflow status with child links
+  hosts: localhost
+  gather_facts: false
+  vars:
+    snow_base: "{{ snow_svc_url | default(snow_url | default(''), true) }}"
+
+  tasks:
+    - name: Defaults for Start loop-complete status
+      ansible.builtin.set_fact:
+        _parent: "{{ parent_incident | default(snow_incident | default('')) }}"
+        parent_status_headline: "{{ parent_status_headline | default('Start workflow finished') }}"
+        parent_status_plain: >-
+          {{
+            parent_status_plain | default(
+              'The remediation **Start** workflow finished for this advisory. '
+              + 'Each AO app has its own child incident — open those for MR, '
+              + 'verifier, merge, build, and deploy updates. '
+              + 'auto_approve apps may already be merged; needs_approval apps '
+              + 'wait for a GitLab merge before CI/CD continues.'
+            )
+          }}
+
+    - name: Post parent status
+      ansible.builtin.import_tasks: tasks/snow-parent-status.yml

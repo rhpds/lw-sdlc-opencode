@@ -41,6 +41,8 @@
               health: Healthy
               guid: "{{ event.payload.guid | default(guid) }}"
               gitlab_path: "{{ event.payload.gitlab_path | default('') }}"
+              argo_app: "{{ event.payload.argo_app | default('') }}"
+              revision: "{{ event.payload.revision | default('') }}"
               snow_url: "{{ snow_url | default('') }}"
               snow_svc_url: "{{ snow_svc_url | default('') }}"
               ao_base_url: "{{ ao_base_url }}"
@@ -68,6 +70,8 @@
               health: "{{ event.payload.health }}"
               guid: "{{ event.payload.guid | default(guid) }}"
               gitlab_path: "{{ event.payload.gitlab_path | default('') }}"
+              argo_app: "{{ event.payload.argo_app | default('') }}"
+              revision: "{{ event.payload.revision | default('') }}"
               snow_url: "{{ snow_url | default('') }}"
               snow_svc_url: "{{ snow_svc_url | default('') }}"
               ao_base_url: "{{ ao_base_url }}"

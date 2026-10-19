@@ -1,0 +1,63 @@
+---
+# Post a brief top-level status on the parent INC with links to child ticket(s).
+# Detail stays on children — parent is the rollup only.
+#
+# Requires: snow_base (or snow_url/snow_svc_url), parent via _parent / parent_incident
+# Optional: parent_status_headline, parent_status_plain, child_incident, gitlab_path,
+#           guid, snow_ui_base (public snow-mock URL for deep links)
+
+- name: Resolve parent number and API/UI bases
+  ansible.builtin.set_fact:
+    _ps_parent: "{{ _parent | default(parent_incident | default(snow_incident | default('')), true) }}"
+    _ps_api: "{{ snow_base | default(snow_svc_url | default(snow_url | default(''), true), true) | regex_replace('/$', '') }}"
+    _ps_ui: "{{ (snow_ui_base | default(snow_url | default('', true), true) | regex_replace('/$', '')) }}"
+
+- name: Require parent for status comment
+  ansible.builtin.assert:
+    that:
+      - (_ps_api | default('') | length) > 0
+      - (_ps_parent | default('') | length) > 0
+    fail_msg: "snow API base and parent incident are required for parent status"
+
+- name: GET parent for child list
+  ansible.builtin.uri:
+    url: "{{ _ps_api }}/api/v1/incidents/{{ _ps_parent }}"
+    method: GET
+    status_code: [200]
+    validate_certs: "{{ validate_certs | default(false) }}"
+  register: _ps_parent_get
+  when: (child_incident | default('') | length) == 0
+
+- name: Build parent status body
+  ansible.builtin.set_fact:
+    _ps_body: |
+      ## {{ parent_status_headline | default('Workflow update') }}
+
+      {{ parent_status_plain | default('See the linked child incident(s) for full details (MR, build, deploy, agent notes).') }}
+
+      ### Child ticket(s)
+      {% if (child_incident | default('') | length) > 0 %}
+      - **{{ child_incident }}**{% if (gitlab_path | default('') | length) > 0 %} — `{{ gitlab_path }}`{% endif %}{% if (_ps_ui | default('') | length) > 0 %} — [open child]({{ _ps_ui }}/#incidents/{{ child_incident }}){% endif %}
+      {% elif (_ps_parent_get is defined) and ((_ps_parent_get.json.result.child_incidents | default([]) | length) > 0) %}
+      {% for c in _ps_parent_get.json.result.child_incidents %}
+      - **{{ c }}**{% if (_ps_ui | default('') | length) > 0 %} — [open child]({{ _ps_ui }}/#incidents/{{ c }}){% endif %}
+      {% endfor %}
+      {% else %}
+      - _(no child incidents yet)_
+      {% endif %}
+
+      ---
+
+      Parent: `{{ _ps_parent }}` · guid: `{{ guid | default('') }}`
+
+- name: POST parent status comment
+  ansible.builtin.uri:
+    url: "{{ _ps_api }}/api/v1/incidents/{{ _ps_parent }}/comments"
+    method: POST
+    body_format: json
+    body:
+      body: "{{ _ps_body }}"
+      created_by: "{{ snow_created_by | default('Lightwell AO') }}"
+      type: additional_comments
+    status_code: [201]
+    validate_certs: "{{ validate_certs | default(false) }}"

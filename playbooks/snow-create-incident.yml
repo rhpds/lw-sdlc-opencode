@@ -15,18 +15,49 @@
 
     - name: Build incident description
       ansible.builtin.set_fact:
+        _pkg_coord: >-
+          {{
+            (
+              (artifact_group | default('') | length) > 0
+              and (artifact_name | default('') | length) > 0
+            )
+            | ternary(
+                (artifact_group | default('')) ~ ':' ~ (artifact_name | default('')),
+                (package_purl | default(artifact_name | default('unknown')))
+              )
+          }}
+        _sev: "{{ severity | default('medium') }}"
+        _cve: "{{ cve_id | default('unknown') }}"
+        _vuln: "{{ vulnerable_version | default('n/a') }}"
+        _fix: "{{ fix_version | default(artifact_version | default('n/a')) }}"
+
+    - name: Format parent short + rich description
+      ansible.builtin.set_fact:
         _snow_short: >-
-          Parent — Lightwell remediation — {{ cve_id | default('unknown') }}
-          {{ artifact_group | default('') }}:{{ artifact_name | default(package_purl | default('')) }}
+          [{{ _cve }}] {{ _sev | upper }} — remediate {{ _pkg_coord }}
+          ({{ _vuln }} → {{ _fix }})
+        # snow-mock UI renders description as Markdown (ADR-044).
         _snow_desc: |
-          Lightwell AO remediation run started (parent incident).
-          Per-app work lands on child incidents after classify.
-          guid: {{ guid | default('') }}
-          CVE: {{ cve_id | default('unknown') }}
-          package: {{ package_purl | default(artifact_name | default('')) }}
-          vulnerable: {{ vulnerable_version | default('') }}
-          fix: {{ fix_version | default(artifact_version | default('')) }}
-          severity: {{ severity | default('medium') }}
+          ## Lightwell remediation — parent incident
+
+          Automation Orchestrator started a multi-app remediation for a remediated Maven artifact.
+          **Child incidents** are created after TPA blast-radius classify (one per AO-owned app).
+
+          ### Advisory
+
+          - **CVE:** `{{ _cve }}`
+          - **Severity:** `{{ _sev }}`
+          - **Package:** `{{ _pkg_coord }}`
+          - **Vulnerable:** `{{ _vuln }}`
+          - **Remediated:** `{{ _fix }}`
+
+          ### Correlation
+
+          - **Tenant guid:** `{{ guid | default('') }}`
+          - **Channel:** Monitoring → Lightwell AO
+          - **Next:** Query TPA → classify → child INCs → Impact / Verifier / merge
+
+          **Support tip:** follow Activity on each **child** for MR, pipeline, Argo, and OpenCode links.
 
 
     - name: POST incident to snow-mock
