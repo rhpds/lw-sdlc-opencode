@@ -4,15 +4,9 @@
 # pipeline + commit status "Pipelines as Code CI / build-push-to-main").
 # Used by AO Merged+Build canvas so we do not need a second Build webhook.
 #
-# Also used by the AO Start canvas to gate auto_approve merges on the
-# pull-request pipeline, by passing build_status_context=build-pull-request
-# and watch_mr_head=true (ADR-049).
-#
 # Requires: gitlab_url, gitlab_token|gitlab_pat, gitlab_path
 # Optional: merge_request_iid, merge_commit_sha, project_id,
-#           build_poll_retries (90), build_poll_delay (10),
-#           build_status_context (build-push-to-main),
-#           watch_mr_head (false - watch the MR head SHA, pre-merge)
+#           build_poll_retries (90), build_poll_delay (10)
 # Exports: status (Succeeded|Failed|Cancelled|TimedOut), pipelinerun-ish fields
 - name: Poll PaC / push build status via GitLab
   hosts: localhost
@@ -54,20 +48,13 @@
       register: _mr
       no_log: true
       when:
+        - (merge_commit_sha | default('') | length) == 0
         - (merge_request_iid | default(0) | int) > 0
-        - >-
-          (merge_commit_sha | default('') | length) == 0
-          or (watch_mr_head | default(false) | bool)
 
     - name: Pick commit SHA to watch
       ansible.builtin.set_fact:
-        # watch_mr_head: gate BEFORE the merge, so the only SHA that exists is
-        # the MR head. merge_commit_sha is null at that point.
         _sha: >-
           {{
-            (_mr.json.sha | default('', true) | trim)
-            if (watch_mr_head | default(false) | bool)
-            else (
             merge_commit_sha
             | default(
                 _mr.json.merge_commit_sha
@@ -76,7 +63,6 @@
                 true
               )
             | trim
-            )
           }}
 
     - name: Fall back to default-branch HEAD when SHA unknown
@@ -89,12 +75,7 @@
         validate_certs: "{{ validate_certs | default(false) }}"
       register: _head
       no_log: true
-      # Never fall back to the default branch when gating pre-merge: main's
-      # last build may be a stale success, which would wave the MR through.
-      # Better to fail the assert below than watch the wrong commit.
-      when:
-        - (_sha | default('') | length) == 0
-        - not (watch_mr_head | default(false) | bool)
+      when: (_sha | default('') | length) == 0
 
     - name: Apply HEAD SHA fallback
       ansible.builtin.set_fact:
@@ -123,7 +104,7 @@
         (
           (_statuses.json | default([]))
           | selectattr('name', 'defined')
-          | selectattr('name', 'search', build_status_context | default('build-push-to-main'))
+          | selectattr('name', 'search', 'build-push-to-main')
           | selectattr('status', 'defined')
           | selectattr('status', 'in', ['success', 'failed', 'canceled'])
           | list
@@ -139,7 +120,7 @@
           {{
             (_statuses.json | default([]))
             | selectattr('name', 'defined')
-            | selectattr('name', 'search', build_status_context | default('build-push-to-main'))
+            | selectattr('name', 'search', 'build-push-to-main')
             | list
           }}
         _any_terminal: >-
