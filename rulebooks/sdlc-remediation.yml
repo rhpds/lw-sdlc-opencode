@@ -2,14 +2,14 @@
 # SDLC remediation — Event-Driven Ansible rulebook (Automation Orchestrator path)
 #
 # EDA is the sensor/bridge only (webhook-driven, no AO Approval PATCH):
-#   Nexus *.rhlw-*           → JT "SDLC Start Orchestrator"     → AO start trigger
-#   GitLab MR merged         → JT "SDLC AO Lifecycle Webhook"   → AO merged trigger
-#   PipelineRun terminal     → JT "SDLC AO Lifecycle Webhook"   → AO build trigger
-#   Argo Synced+Healthy/fail → JT "SDLC AO Lifecycle Webhook"   → AO deploy trigger
+#   Nexus *.rhlw-*           → JT "SDLC Start Orchestrator"     → AO (type=start)
+#   GitLab MR merged         → JT "SDLC AO Lifecycle Webhook"   → AO (type=merged)
+#   PipelineRun terminal     → JT "SDLC AO Lifecycle Webhook"   → AO (type=build)
+#   Argo Synced+Healthy/fail → JT "SDLC AO Lifecycle Webhook"   → AO (type=deploy)
 #
-# Students always merge in GitLab. Lifecycle rules MUST NOT Start a second
-# Nexus remediation (ADR-025). Do NOT act on MR open. Conditions: ansible-rulebook
-# syntax only. For the pre-AO chain, use sdlc-remediation-legacy.yml.
+# All rules POST the same AO webhook path (ao_start_webhook_path). AO routes on
+# trigger.type (single eda_trigger + switch). Lifecycle MUST NOT fire Start
+# Orchestrator (ADR-025). Do NOT act on MR open. For pre-AO: sdlc-remediation-legacy.yml.
 
 - name: SDLC OpenCode remediation
   hosts: all
@@ -32,7 +32,7 @@
           organization: "{{ aap_organization_name }}"
           job_args:
             extra_vars:
-              ao_lifecycle_webhook_path: "{{ ao_build_webhook_path }}"
+              ao_lifecycle_webhook_path: "{{ ao_start_webhook_path }}"
               lifecycle_type: lightwell_build
               signal_source: pipelinerun
               status: Succeeded
@@ -59,7 +59,7 @@
           organization: "{{ aap_organization_name }}"
           job_args:
             extra_vars:
-              ao_lifecycle_webhook_path: "{{ ao_build_webhook_path }}"
+              ao_lifecycle_webhook_path: "{{ ao_start_webhook_path }}"
               lifecycle_type: lightwell_build
               signal_source: pipelinerun
               status: "{{ event.payload.status }}"
@@ -87,7 +87,7 @@
           organization: "{{ aap_organization_name }}"
           job_args:
             extra_vars:
-              ao_lifecycle_webhook_path: "{{ ao_deploy_webhook_path }}"
+              ao_lifecycle_webhook_path: "{{ ao_start_webhook_path }}"
               lifecycle_type: lightwell_deploy
               signal_source: argo_healthy
               sync: Synced
@@ -114,7 +114,7 @@
           organization: "{{ aap_organization_name }}"
           job_args:
             extra_vars:
-              ao_lifecycle_webhook_path: "{{ ao_deploy_webhook_path }}"
+              ao_lifecycle_webhook_path: "{{ ao_start_webhook_path }}"
               lifecycle_type: lightwell_deploy
               signal_source: argo_failed
               sync: "{{ event.payload.sync | default('') }}"
@@ -142,7 +142,7 @@
           organization: "{{ aap_organization_name }}"
           job_args:
             extra_vars:
-              ao_lifecycle_webhook_path: "{{ ao_merged_webhook_path }}"
+              ao_lifecycle_webhook_path: "{{ ao_start_webhook_path }}"
               lifecycle_type: lightwell_mr_merged
               signal_source: gitlab_mr_merged
               guid: "{{ guid | default('') }}"

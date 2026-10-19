@@ -9,10 +9,11 @@
   tasks:
     - name: Resolve lifecycle webhook path
       ansible.builtin.set_fact:
+        # Prefer explicit lifecycle override; else same single path as Start (ADR-037).
         ao_webhook_path: >-
           {{
             ao_lifecycle_webhook_path
-            | default(ao_webhook_path | default(''), true)
+            | default(ao_start_webhook_path | default(ao_webhook_path | default(''), true), true)
           }}
 
     - name: Build AO lifecycle payload
