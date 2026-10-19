@@ -1,5 +1,5 @@
 ---
-# Per-iteration SNOW comment after Impact/Verifier/merge/reject.
+# Per-iteration SNOW comment after Impact/Verifier/merge/reject/CI gates.
 - name: Comment ServiceNow with per-iteration outcome
   hosts: localhost
   gather_facts: false
@@ -19,7 +19,7 @@
           - (_target_incident | default('') | length) > 0
         fail_msg: "snow_base and child_incident (or snow_incident) are required"
 
-    - name: Build iteration comment
+    - name: Optional manual-verify line for CI/CD gate failures
       ansible.builtin.set_fact:
         _manual_verify_line: >-
           {{
@@ -27,6 +27,9 @@
             if (iteration_outcome | default('')) in ['build_failed', 'deploy_failed']
             else ''
           }}
+
+    - name: Build iteration comment
+      ansible.builtin.set_fact:
         snow_comment_body: |
           Iteration outcome for {{ gitlab_path | default('unknown') }}:
           - approval policy: {{ approval | default('n/a') }}
