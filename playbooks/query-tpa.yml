@@ -1,43 +1,35 @@
 ---
-# Query TPA for blast radius; POST tpa_results back to EDA (demo depth A).
+# Query TPA for blast radius; POST tpa_results back to EDA.
+# Blast radius: for each tenant Acme app SBOM (by name), match packages on
+# group:artifact (any version). Does NOT invent apps via REMEDIATION_APP_GITLAB_PATH.
 - name: Query TPA for affected repositories
   hosts: localhost
   gather_facts: false
   vars:
     # Literal default only — self-referential Jinja (x: "{{ x | default(...) }}") recurses on AWX.
-    blast_radius_mode: single_app_demo_a
-    remediation_gitlab_path: "{{ remediation_app_gitlab_path | default('lightwell/lw-demo-help-app') }}"
+    blast_radius_mode: tpa_affected_repos
+    # Search space for tenant apps (not the RH product corpus). Chart/EDA may override.
+    acme_app_names:
+      - wire-transfer-svc
+      - benefits-mgmt-app
+      - report-generator-app
+    remediation_gitlab_path: "{{ remediation_app_gitlab_path | default('') }}"
 
   tasks:
     - name: Import TPA token tasks
       ansible.builtin.import_tasks: tasks/get-tpa-token.yml
 
-    - name: Query TPA SBOM API by label
-      ansible.builtin.uri:
-        url: "{{ tpa_url }}/api/v2/sbom?labels.name={{ tpa_sbom_label | urlencode }}"
-        method: GET
-        headers:
-          Authorization: "Bearer {{ tpa_access_token }}"
-        validate_certs: "{{ validate_certs | default(false) }}"
-        status_code: [200, 401, 404]
-      register: tpa_query
-      when: tpa_access_token is defined
-      ignore_errors: true
-
-    - name: Default empty SBOM items
-      ansible.builtin.set_fact:
-        tpa_sbom_items: []
-
-    - name: Set TPA SBOM items from API response
-      ansible.builtin.set_fact:
-        tpa_sbom_items: "{{ tpa_query.json['items'] | default(tpa_query.json['results'] | default([])) }}"
-      when: tpa_query is succeeded and tpa_query.status == 200
-
     - name: Derive artifact coordinates from Nexus or vulnerability event
       ansible.builtin.set_fact:
         resolved_artifact_id: "{{ (artifact_group ~ ':' ~ artifact_name) if (artifact_group | default('') | length > 0 and artifact_name | default('') | length > 0) else (package_purl | default(artifact_name | default(''), true)) }}"
         resolved_new_version: "{{ artifact_version | default(fix_version | default('')) }}"
-        resolved_gitlab_path: "{{ remediation_gitlab_path }}"
+        maven_group: "{{ artifact_group | default('') }}"
+        maven_artifact: "{{ artifact_name | default('') }}"
+        gitlab_group: "{{ gitlab_group | default(('acme-' ~ guid) if (guid | default('') | length) > 0 else '') }}"
+
+    - name: Derive base Maven PURL (version-agnostic match key)
+      ansible.builtin.set_fact:
+        base_purl: "{{ ('pkg:maven/' ~ maven_group ~ '/' ~ maven_artifact) if (maven_group | length > 0 and maven_artifact | length > 0) else '' }}"
 
     # A plain Nexus component event carries no CVE, so cve_id arrives as
     # "unknown" and the MR body would have nothing to show. publish-remediation.sh
@@ -82,8 +74,6 @@
         resolved_cve_id: "{{ _pick.identifier | default(cve_id | default('unknown'), true) }}"
         resolved_cve_title: "{{ _pick.title | default('') }}"
         resolved_cve_description: "{{ _pick.description | default('') }}"
-        # base_score is the field TPA actually returns; render it with the
-        # usual qualitative band so the MR reads like a CVSS score.
         resolved_cvss_score: >-
           {{ ('%.1f (%s)' % (
                _pick.base_score | float,
@@ -109,29 +99,50 @@
           cve_description: "{{ resolved_cve_description }}"
           cvss_score: "{{ resolved_cvss_score }}"
 
-    # Demo A: labeled SBOM present ⇒ one affected app (help-app). No SBOM ⇒ count 0.
-    - name: Build blast radius — match (single app)
+    - name: Stage blast-radius helper input
+      ansible.builtin.copy:
+        dest: /tmp/tpa-blast-radius-input.json
+        mode: "0600"
+        content: "{{ blast_input | to_nice_json }}"
+      vars:
+        blast_input:
+          tpa_url: "{{ tpa_url }}"
+          token: "{{ tpa_access_token | default('') }}"
+          apps: "{{ acme_app_names }}"
+          maven_group: "{{ maven_group }}"
+          maven_artifact: "{{ maven_artifact }}"
+          gitlab_url: "{{ gitlab_url | default('') }}"
+          gitlab_group: "{{ gitlab_group }}"
+          verify: "{{ validate_certs | default(false) | bool }}"
+      when: tpa_access_token is defined and (base_purl | length) > 0
+      no_log: true
+
+    - name: Compute affected_repos from Acme SBOM package matches
+      ansible.builtin.shell: |
+        python3 "{{ playbook_dir }}/files/tpa_blast_radius.py" < /tmp/tpa-blast-radius-input.json
+      register: blast_radius_cmd
+      when: tpa_access_token is defined and (base_purl | length) > 0
+      changed_when: false
+      no_log: true
+
+    - name: Parse blast-radius helper output
       ansible.builtin.set_fact:
-        affected_repos:
-          - repo_url: "{{ gitlab_url | regex_replace('/$', '') }}/{{ resolved_gitlab_path }}.git"
-            gitlab_path: "{{ resolved_gitlab_path }}"
-            sbom_id: "{{ tpa_sbom_items[0].id | default('unknown') }}"
-            sbom_label: "{{ tpa_sbom_label }}"
-            match_reason: "sbom_label_and_dependency_coordinate"
-            app_classification: demo
-            deployment_env: development
+        affected_repos: "{{ (blast_radius_cmd.stdout | from_json).affected_repos | default([]) }}"
         blast_radius:
           mode: "{{ blast_radius_mode }}"
-          count: 1
-      when: (tpa_sbom_items | length) > 0 and (resolved_artifact_id | length) > 0
+          count: "{{ ((blast_radius_cmd.stdout | from_json).affected_repos | default([])) | length }}"
+          base_purl: "{{ (blast_radius_cmd.stdout | from_json).base_purl | default(base_purl) }}"
+          errors: "{{ (blast_radius_cmd.stdout | from_json).errors | default([]) }}"
+      when: blast_radius_cmd is defined and blast_radius_cmd is succeeded
 
-    - name: Build blast radius — no match
+    - name: Default empty blast radius when helper skipped
       ansible.builtin.set_fact:
         affected_repos: []
         blast_radius:
           mode: "{{ blast_radius_mode }}"
           count: 0
-      when: (tpa_sbom_items | length) == 0 or (resolved_artifact_id | default('') | length) == 0
+          base_purl: "{{ base_purl | default('') }}"
+      when: affected_repos is not defined
 
     - name: Emit tpa_results (debug)
       ansible.builtin.debug:
@@ -168,37 +179,13 @@
           query: "{{ package_purl | default(resolved_artifact_id, true) }}"
         per_host: false
 
-    # multi_app_policy_demo: classify expands to the three Acme apps even when
-    # TPA still has the Red Hat product dataset (no Acme SBOMs yet). Soft-pass.
-    - name: Soft-pass empty blast radius for multi_app_policy_demo
-      ansible.builtin.set_fact:
-        affected_repos: "{{ affected_repos | default([]) }}"
-        blast_radius:
-          mode: multi_app_policy_demo
-          count: 3
-          note: "synthetic — classify expands to seeded Acme apps"
-      when: >
-        (blast_radius_mode | default('')) == 'multi_app_policy_demo'
-        and (blast_radius.count | default(0) | int) < 1
-
-    - name: Re-export artifacts after soft-pass
-      ansible.builtin.set_stats:
-        data:
-          package_info: "{{ package_info }}"
-          affected_repos: "{{ affected_repos }}"
-          blast_radius: "{{ blast_radius }}"
-          query: "{{ package_purl | default(resolved_artifact_id, true) }}"
-        per_host: false
-      when: >
-        (blast_radius_mode | default('')) == 'multi_app_policy_demo'
-        and (blast_radius.note | default('')) | length > 0
-
     # AO canvas gates Impact on Query TPA job success. Legacy EDA already received
     # the tpa_results callback above when eda_webhook_url is set.
     - name: Fail when blast radius is empty (AO does not launch Impact)
       ansible.builtin.fail:
         msg: >-
           No blast radius for {{ resolved_artifact_id | default('unknown') }}
-          (SBOM label {{ tpa_sbom_label | default('') }}). Skipping remediation.
+          (base_purl={{ blast_radius.base_purl | default(base_purl) | default('') }};
+          checked apps={{ acme_app_names | join(',') }}).
+          Skipping remediation.
       when: (blast_radius.count | default(0) | int) < 1
-
