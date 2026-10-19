@@ -1,0 +1,101 @@
+---
+# After OpenCode goes idle: fetch session title + message history, build a
+# short summary for AAP stdout / AO artifacts / SNOW comments, and a deep
+# link into the OpenCode UI (…/global/session/{id}).
+#
+# Requires: opencode_base_url, opencode_session_id, opencode_basic_auth_b64
+# Optional: opencode_ui_url (base Route URL, no trailing slash)
+# Exports facts: opencode_session_title, opencode_session_summary,
+#                opencode_session_ui_url, opencode_session_tools
+
+- name: Build OpenCode basic auth header (summary)
+  ansible.builtin.set_fact:
+    opencode_basic_auth_b64: "{{ (opencode_server_username | default('opencode') ~ ':' ~ opencode_server_password) | b64encode }}"
+  when: opencode_basic_auth_b64 is not defined
+  no_log: true
+
+- name: Fetch OpenCode session metadata
+  ansible.builtin.uri:
+    url: "{{ opencode_base_url | regex_replace('/$', '') }}/session/{{ opencode_session_id }}"
+    method: GET
+    headers:
+      Authorization: "Basic {{ opencode_basic_auth_b64 }}"
+    status_code: [200]
+    validate_certs: "{{ validate_certs | default(false) }}"
+  register: _oc_session_meta
+  failed_when: false
+
+- name: Fetch OpenCode session messages
+  ansible.builtin.uri:
+    url: "{{ opencode_base_url | regex_replace('/$', '') }}/session/{{ opencode_session_id }}/message"
+    method: GET
+    headers:
+      Authorization: "Basic {{ opencode_basic_auth_b64 }}"
+    status_code: [200]
+    validate_certs: "{{ validate_certs | default(false) }}"
+  register: _oc_session_msgs
+  failed_when: false
+
+- name: Summarize assistant text from messages
+  ansible.builtin.command:
+    argv:
+      - python3
+      - "{{ playbook_dir }}/files/opencode_session_summary.py"
+      - --max
+      - "{{ opencode_summary_max_chars | default(1200) | string }}"
+  args:
+    stdin: "{{ _oc_session_msgs.json | default([]) | to_json }}"
+  register: _oc_sum
+  changed_when: false
+  failed_when: false
+  when:
+    - (_oc_session_msgs.status | default(0) | int) == 200
+    - (_oc_session_msgs.json | default([]) | length) > 0
+
+- name: Resolve OpenCode UI deep link
+  ansible.builtin.set_fact:
+    opencode_session_title: >-
+      {{
+        (_oc_session_meta.json.title | default('', true))
+        if (_oc_session_meta is defined and (_oc_session_meta.status | default(0) | int) == 200)
+        else ''
+      }}
+    opencode_session_summary: >-
+      {{
+        (_oc_sum.stdout | default('', true) | trim)
+        if (_oc_sum is defined)
+        else ''
+      }}
+    opencode_session_tools: >-
+      {{
+        ((_oc_sum.stderr | default('', true) | trim) | regex_replace('^tools:\\s*', ''))
+        if (_oc_sum is defined)
+        else ''
+      }}
+    opencode_session_ui_url: >-
+      {{
+        (
+          (opencode_ui_url | default('', true) | regex_replace('/$', ''))
+          + '/global/session/' + (opencode_session_id | string)
+        )
+        if (opencode_ui_url | default('', true) | length) > 0
+        else ''
+      }}
+  when: (opencode_session_id | default('') | length) > 0
+
+- name: Default empty summary facts when fetch skipped
+  ansible.builtin.set_fact:
+    opencode_session_title: "{{ opencode_session_title | default('', true) }}"
+    opencode_session_summary: "{{ opencode_session_summary | default('', true) }}"
+    opencode_session_tools: "{{ opencode_session_tools | default('', true) }}"
+    opencode_session_ui_url: "{{ opencode_session_ui_url | default('', true) }}"
+
+- name: Log OpenCode session summary (AAP job stdout)
+  ansible.builtin.debug:
+    msg: |
+      OpenCode session {{ opencode_session_id | default('n/a') }}
+      title: {{ opencode_session_title | default('(none)') }}
+      ui: {{ opencode_session_ui_url | default('(set opencode_ui_url for deep link)') }}
+      tools: {{ opencode_session_tools | default('(n/a)') }}
+      --- summary ---
+      {{ opencode_session_summary | default('(empty)') }}

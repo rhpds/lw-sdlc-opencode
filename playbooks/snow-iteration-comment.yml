@@ -60,6 +60,26 @@
             }[_outcome] | default('Iteration update — ' + _path + ' (' + _outcome + ')')
           }}
 
+    - name: Resolve OpenCode UI deep link
+      ansible.builtin.set_fact:
+        _oc_ui: >-
+          {{
+            opencode_session_ui_url | default('', true)
+            if (opencode_session_ui_url | default('', true) | length) > 0
+            else (
+              (
+                (opencode_ui_url | default('', true) | regex_replace('/$', ''))
+                + '/global/session/' + (opencode_session_id | string)
+              )
+              if (
+                (opencode_ui_url | default('', true) | length) > 0
+                and (opencode_session_id | default('') | length) > 0
+              )
+              else ''
+            )
+          }}
+        _oc_summary: "{{ opencode_session_summary | default('', true) | trim }}"
+
     - name: Build iteration comment
       ansible.builtin.set_fact:
         snow_comment_body: |
@@ -69,6 +89,19 @@
           Verifier: {{ verifier_status | default('n/a') }}
           {% if (_iid | default('') | string | length) > 0 and (_iid | default(0) | int) > 0 -%}
           MR: !{{ _iid }}{% if (_mr_url | default('') | length) > 0 %} — {{ _mr_url }}{% endif %}
+          {% endif -%}
+          {% if (_oc_ui | default('') | length) > 0 -%}
+          OpenCode: {{ _oc_ui }}
+          {% elif (opencode_session_id | default('') | length) > 0 -%}
+          OpenCode session: {{ opencode_session_id }}
+          {% endif -%}
+          {% if (opencode_session_title | default('') | length) > 0 -%}
+          Agent: {{ opencode_session_title }}
+          {% endif -%}
+          {% if (_oc_summary | default('') | length) > 0 -%}
+
+          --- agent summary ---
+          {{ _oc_summary }}
           {% endif -%}
           {% if (_outcome | default('')) in ['build_failed', 'deploy_failed'] -%}
           Next: manual verify (CI/CD gate rejected or timed out)
@@ -96,4 +129,6 @@
           parent_incident: "{{ parent_incident | default('') }}"
           iteration_outcome: "{{ _outcome }}"
           merge_request_url: "{{ _mr_url | default('') }}"
+          opencode_session_id: "{{ opencode_session_id | default('') }}"
+          opencode_session_ui_url: "{{ _oc_ui | default('') }}"
         per_host: false

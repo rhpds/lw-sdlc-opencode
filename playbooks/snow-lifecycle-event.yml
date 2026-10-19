@@ -154,6 +154,9 @@
           {% if (_health | default('') | length) > 0 -%}
           Deploy health: {{ _health }}
           {% endif -%}
+          {% if (opencode_session_ui_url | default('', true) | length) > 0 -%}
+          OpenCode: {{ opencode_session_ui_url }}
+          {% endif -%}
           {% if (_outcome | default('')) in ['build_failed', 'deploy_failed'] -%}
           Next: manual verify (build/deploy failed)
           {% endif -%}

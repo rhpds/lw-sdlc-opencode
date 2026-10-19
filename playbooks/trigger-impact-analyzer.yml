@@ -94,6 +94,10 @@
       ansible.builtin.import_tasks: tasks/opencode-wait-idle.yml
       when: (_iter_repos | length) >= 1 and (opencode_session_id | default('') | length) > 0
 
+    - name: Capture OpenCode session summary + UI deep link
+      ansible.builtin.import_tasks: tasks/opencode-session-summary.yml
+      when: (_iter_repos | length) >= 1 and (opencode_session_id | default('') | length) > 0
+
     - name: Detect already-current vs needs MR
       ansible.builtin.import_tasks: tasks/detect-impact-outcome.yml
       when: (_iter_repos | length) >= 1 and (opencode_session_id | default('') | length) > 0
@@ -156,6 +160,10 @@
           gitlab_path: "{{ opencode_gitlab_path | default('') }}"
           approval: "{{ app_approval | default('needs_approval') }}"
           opencode_session_id: "{{ opencode_session_id | default('') }}"
+          opencode_session_title: "{{ opencode_session_title | default('') }}"
+          opencode_session_summary: "{{ opencode_session_summary | default('') }}"
+          opencode_session_ui_url: "{{ opencode_session_ui_url | default('') }}"
+          opencode_ui_url: "{{ opencode_ui_url | default('') }}"
           draft_mr: "{{ false if (impact_already_current | default(false) | bool) else true }}"
           remediation_needed: "{{ not (impact_already_current | default(false) | bool) }}"
           iteration_outcome: "{{ iteration_outcome | default('mr_opened') }}"
