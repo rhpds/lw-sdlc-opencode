@@ -43,6 +43,20 @@ Session JSON (from EDA / GitLab webhook normalization):
 
 Prefer handoff JSON over webhook fields when both exist; they must agree on `merge_request_iid` and `source_branch`.
 
+5. **Claim the check before doing any work.**
+
+   ```bash
+   python3 /app/scripts/gitlab_api.py commit-status --project-id <id> --mr-iid <iid> \
+     --state pending --description "Lightwell verifier running"
+   ```
+
+   The project sets `only_allow_merge_if_pipeline_succeeds`, and GitLab rolls
+   external commit statuses on a SHA into the pipeline it gates on. Until this
+   status exists the gate knows nothing about you: the Tekton run can go green
+   and release the merge while you are still building. Posting `pending` first
+   holds the merge request for the whole time you are working, which is the
+   entire point of the gate.
+
 ## Step 2 — Compile and unit test (isolated Job)
 
 **Forbidden:** Running `mvn clean verify`, `gradle test`, or `npm test` inside the OpenCode control-plane container.
@@ -512,6 +526,28 @@ Rules, in order of importance:
    Details written at creation time are preserved. Never use `mr-update` to
    replace the whole description.
 
+### Close the check
+
+After `mr-validation`, report the outcome to the gate. Send `success` **only**
+when every one of the seven keys came back `passed`; anything else — a
+`failed`, a `warning`, or a key you had to omit — is `failed`:
+
+```bash
+python3 /app/scripts/gitlab_api.py commit-status --project-id <id> --mr-iid <iid> \
+  --state success --description "7/7 checks passed"
+# or
+python3 /app/scripts/gitlab_api.py commit-status --project-id <id> --mr-iid <iid> \
+  --state failed --description "Regression scan is warning; License compliance is pending"
+```
+
+This is the same rule the Tekton route enforces: `warning` and `pending` both
+mean "not established", and a merge request only becomes mergeable on a fully
+green table. **Never skip this call** — a verifier that dies without closing
+its own `pending` status leaves the merge request permanently unmergeable,
+which is worse than a red one. If you have to stop early (step 1 fail-closed,
+`oc` forbidden, a packaging mismatch), post `failed` with the reason and then
+stop.
+
 ## Step 6 — Summarize on MR
 
 ```bash
@@ -524,7 +560,8 @@ Include: verify Job name and pass/fail, ephemeral namespace and Route URL, smoke
 
 | Condition | Action |
 |-----------|--------|
-| Invalid handoff | `mr-note`; stop |
+| Invalid handoff | post `commit-status --state failed`, `mr-note`, stop |
+| About to stop for any reason | Close the `pending` commit status first. An abandoned `pending` blocks the merge request forever |
 | Job failed | step 5 with the failing key(s), then `mr-note` with logs; stop |
 | `oc apply` prints `job.batch/... unchanged` | You are about to read a previous run's Job. Delete it and re-apply (step 2.1); never poll a Job you did not create |
 | Deployment never becomes ready | A crash-looping pod is a result. Report the smoke test `failed` with `oc logs` output — do not delete and recreate the Deployment to retry |
