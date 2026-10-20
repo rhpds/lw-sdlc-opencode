@@ -49,7 +49,21 @@ Prefer handoff JSON over webhook fields when both exist; they must agree on `mer
 
 Demo depth **A** (`lw-demo-help-app`): use **`mvn clean verify`** unless handoff specifies otherwise.
 
-1. **Idempotency:** `oc get job -n "$SDLC_SANDBOX_NAMESPACE" -l mr-iid=<merge_request_iid>` — if a running/succeeded Job exists, reuse logs or skip recreate per operator policy. If a **failed** Job exists for this MR, delete it first (`oc delete job -n "$SDLC_SANDBOX_NAMESPACE" -l mr-iid=<merge_request_iid>`); a Job spec is immutable, so re-applying over a failed one silently keeps the old spec.
+1. **Idempotency — always delete before apply.** A Job spec is immutable, so
+   `oc apply` over an existing Job prints `job.batch/verify-mr-<iid> unchanged`
+   and changes nothing. If a previous Job for this MR failed, the poll in step 5
+   then reads *that* Job's terminal state and you report a stale result as if it
+   were current. Do not branch on whether a Job exists — unconditionally:
+
+   ```bash
+   oc delete job verify-mr-<merge_request_iid> -n "$SDLC_SANDBOX_NAMESPACE" --ignore-not-found --wait=true
+   oc apply -f /tmp/opencode/verify-job-mr-<merge_request_iid>.yaml
+   ```
+
+   Then confirm you are looking at the new Job before trusting its logs:
+   `oc get job verify-mr-<iid> -n "$SDLC_SANDBOX_NAMESPACE" -o jsonpath='{.metadata.creationTimestamp}'`
+   must be from this run. If the apply printed `unchanged`, **stop** — you are
+   about to report someone else's result.
 
 2. **Provision git credentials in `$SDLC_SANDBOX_NAMESPACE`.** The clone target is a private GitLab project and this namespace does **not** inherit the control-plane PAT, so a Job without credentials dies on `fatal: could not read Username`. Create the secret idempotently before applying the Job:
 
@@ -199,9 +213,33 @@ Demo depth **A** (`lw-demo-help-app`): use **`mvn clean verify`** unless handoff
    oc logs job/verify-mr-<merge_request_iid> -n "$SDLC_SANDBOX_NAMESPACE" --all-containers --tail=200
    ```
 
-6. Non-zero exit → post MR note with log excerpt via `mr-note`; **stop** (no ephemeral deploy).
+6. Non-zero exit → **still do step 5 first**, then post the MR note with a log
+   excerpt via `mr-note`, then **stop** (no ephemeral deploy).
+
+   Skipping step 5 on failure is not the safe option. The table may already
+   carry passing rows from an earlier run of another verifier; leaving it
+   untouched publishes a green table for a build you just watched fail. Send
+   the keys the failure actually speaks to — for a dependency-resolution error
+   that is `dependency_compat: failed`, and `unit_tests` stays **omitted**,
+   because a build that died before Surefire ran did not fail its unit tests,
+   it never had any. `mr-validation` rewrites Recommended Action to
+   "Do not merge" on any `failed` key.
 
 ## Step 3 — Ephemeral deploy
+
+**Applicability check — do this before creating anything.** The Dockerfile and
+smoke test below assume an executable Spring Boot **jar** (demo depth A,
+`lw-demo-help-app`). Check the packaging in the MR branch's `pom.xml`:
+
+```bash
+python3 /app/scripts/gitlab_api.py file-get --path <gitlab_path> --file-path pom.xml --ref <source_branch> | grep -m1 '<packaging>'
+```
+
+If it is anything other than `jar` — `war`, for instance — this skill cannot
+deploy it: `java -jar app.war` fails at once with `no main manifest attribute`
+and no number of rebuilds will change that. Skip steps 3 and 4, leave the
+smoke-test-dependent rows Pending, and say so in the step 6 note. Steps 2 and 5
+are packaging-independent and still apply.
 
 Namespace: `${EPHEMERAL_NS_PREFIX}-<merge_request_iid>`.
 
@@ -256,7 +294,19 @@ Namespace: `${EPHEMERAL_NS_PREFIX}-<merge_request_iid>`.
    oc create route edge --service=help-im-vulnerable --port=8080 -n ${EPHEMERAL_NS_PREFIX}-<merge_request_iid>
    ```
 
-6. Wait for `oc rollout status deploy/help-im-vulnerable` before smoke testing, and record the Route URL.
+6. Wait for the rollout before smoke testing, and record the Route URL. **Always
+   pass `--timeout`** — bare `oc rollout status` blocks until the Deployment's
+   `progressDeadlineSeconds` (default 600s) and, on an image that crashes on
+   startup, it will simply keep the session busy:
+
+   ```bash
+   oc rollout status deploy/<app> -n ${EPHEMERAL_NS_PREFIX}-<merge_request_iid> --timeout=300s
+   ```
+
+   If it times out, do **not** delete and recreate the Deployment to try again —
+   a crash-looping pod is a result, not a transient error. Capture
+   `oc logs deploy/<app> --tail=50`, report the smoke test as `failed` with that
+   excerpt, and move to step 5.
 
 Platform namespaces for OpenCode are managed by **Argo CD**—do not modify `sdlc-control-plane` or `sdlc-mcp-servers` in this skill.
 
@@ -279,23 +329,45 @@ The MR body created by `bump-maven-mr` carries an **Automated Validation**
 table with every row Pending. You own those rows: replace them with what the
 verify Job and smoke tests actually produced.
 
+### Which checks this skill can actually establish
+
+`mvn clean verify` (step 2) plus the smoke test (step 4) produce evidence for
+**three** keys and no others. Unless you ran something extra and can quote its
+output, this is the complete list of keys you are entitled to send:
+
+| Key | Evidence you must be able to quote |
+|-----|------------------------------------|
+| `unit_tests` | the Surefire `Tests run: N, Failures: …, Errors: …, Skipped: …` summary line |
+| `integration_tests` | the Failsafe `Tests run: …` summary line |
+| `dependency_compat` | `BUILD SUCCESS`, or the resolution error that replaced it |
+
+`signature`, `sbom_integrity`, `regression` and `license` are **not measured by
+this skill**. Nothing in `mvn clean verify` checksums the artifact against
+Nexus, diffs behaviour, or compares licence metadata. Omit those four keys.
+They stay Pending, a human sees that nobody checked them, and that is the
+correct outcome. Sending them because a green table looks finished is the one
+failure this step exists to prevent.
+
+So a passing run sends exactly this shape — note the four absent keys:
+
 ```bash
 python3 /app/scripts/gitlab_api.py mr-validation --project-id <id> --iid <iid> --results '{
-  "signature":          {"status": "passed", "details": "Signed by Red Hat Lightwell (SHA-256)"},
-  "sbom_integrity":     {"status": "passed", "details": "CycloneDX SBOM matches binary contents"},
-  "unit_tests":         {"status": "passed", "details": "43/43 tests passed (0 failures, 0 skipped)"},
-  "integration_tests":  {"status": "passed", "details": "9/9 API contract tests passed"},
-  "dependency_compat":  {"status": "passed", "details": "No breaking API changes detected"},
-  "regression":         {"status": "passed", "details": "Behavioral diff: 0 changes detected"},
-  "license":            {"status": "passed", "details": "Apache-2.0 (unchanged)"}
+  "unit_tests":        {"status": "passed", "details": "<N>/<N> tests passed (0 failures, 0 errors, 0 skipped)"},
+  "integration_tests": {"status": "passed", "details": "<N>/<N> tests passed (0 failures, 0 errors, 0 skipped)"},
+  "dependency_compat": {"status": "passed", "details": "Build succeeded against <artifact_id>:<new_version>"}
 }'
 ```
 
+Every `<N>` above is a placeholder. Copying a number out of this file instead of
+reading it out of the Job log is a fabrication even when the build did pass.
+
 Rules, in order of importance:
 
-1. **Report only what you measured.** Take test counts from the Surefire/Failsafe
-   output in the Job log, not from memory and not from this example. If the Job
-   did not run a check, leave that key out — it stays Pending, which is honest.
+1. **Report only what you measured.** Before you send a key, name the line of
+   Job or smoke-test output it came from. If you cannot quote that line, or if
+   the justification is "inferred from the build passing", the check was not
+   measured: leave the key out. Inference is not measurement — a build that
+   compiles tells you nothing about licence metadata or behavioural regression.
    A fabricated ✅ is the worst possible outcome here, because the whole point
    of the table is that a human can trust it.
 2. `status` is one of `passed`, `failed`, `pending`, `skipped`, `warning`.
@@ -322,7 +394,10 @@ Include: verify Job name and pass/fail, ephemeral namespace and Route URL, smoke
 | Condition | Action |
 |-----------|--------|
 | Invalid handoff | `mr-note`; stop |
-| Job failed | `mr-note` with logs; stop |
+| Job failed | step 5 with the failing key(s), then `mr-note` with logs; stop |
+| `oc apply` prints `job.batch/... unchanged` | You are about to read a previous run's Job. Delete it and re-apply (step 2.1); never poll a Job you did not create |
+| Deployment never becomes ready | A crash-looping pod is a result. Report the smoke test `failed` with `oc logs` output — do not delete and recreate the Deployment to retry |
+| Tempted to send `signature`, `sbom_integrity`, `regression` or `license` | This skill does not measure them. Omit the key |
 | Job still running after the poll budget | `mr-note` reporting a timeout — never report a failed Job as "blocked" |
 | `Could not find artifact ... in central` | Build config bug, not a bad bump — check the `maven-settings` ConfigMap and `-s` flag before blaming the MR |
 | `Blocked mirror for repositories` | The `maven-default-http-blocker` override is missing from settings.xml |
