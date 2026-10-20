@@ -28,7 +28,8 @@
           }}
         _sev: "{{ severity | default('medium') }}"
         # Placeholder until Query TPA resolves a real CVE-YYYY-NNNN (then parent is PATCHed).
-        _cve: "{{ cve_id | default('CVE-') }}"
+        # Normalize extra_var "unknown" — never put it in the SNOW title.
+        _cve: "{{ cve_id if ((cve_id | default('')) is match('^CVE-[0-9]')) else 'CVE-' }}"
         _vuln: "{{ vulnerable_version | default('n/a') }}"
         _fix: "{{ fix_version | default(artifact_version | default('n/a')) }}"
 

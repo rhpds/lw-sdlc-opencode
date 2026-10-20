@@ -55,7 +55,8 @@
       ansible.builtin.set_fact:
         tpa_vuln_items: []
         # Placeholder until a real CVE-YYYY-NNNN is resolved (never "unknown").
-        resolved_cve_id: "{{ cve_id | default('CVE-') }}"
+        # cve_id may be an AAP extra_var ("unknown") that shadows set_fact.
+        resolved_cve_id: "{{ cve_id if ((cve_id | default('')) is match('^CVE-[0-9]')) else 'CVE-' }}"
         resolved_cve_title: ""
         resolved_cve_description: ""
         resolved_cvss_score: ""

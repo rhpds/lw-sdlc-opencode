@@ -50,9 +50,22 @@
               )
           }}
         _sev: "{{ severity | default('medium') }}"
-        _cve: "{{ cve_id | default(package_info.cve_id | default('CVE-'), true) }}"
+        # cve_id is often an AAP extra_var ("unknown") and shadows set_fact —
+        # prefer package_info / resolved_cve_id when they hold a real CVE-YYYY-*.
+        _cve_matches: >-
+          {{
+            [
+              package_info.cve_id | default(''),
+              resolved_cve_id | default(''),
+              cve_id | default('')
+            ] | select('match', '^CVE-[0-9]') | list
+          }}
         _vuln: "{{ vulnerable_version | default('n/a') }}"
         _fix: "{{ fix_version | default(artifact_version | default('n/a')) }}"
+
+    - name: Pick resolved CVE for parent title
+      ansible.builtin.set_fact:
+        _cve: "{{ (_cve_matches | first) if (_cve_matches | length > 0) else 'CVE-' }}"
 
     - name: Format parent short description
       ansible.builtin.set_fact:
@@ -118,8 +131,19 @@
           blast_radius: "{{ blast_radius | default({}) }}"
           renovate_skips: "{{ renovate_skips | default([]) }}"
           policy_failures: "{{ policy_failures | default([]) }}"
-          cve_id: "{{ cve_id | default(package_info.cve_id | default('CVE-'), true) }}"
-          cve_title: "{{ cve_title | default(package_info.cve_title | default(''), true) }}"
-          cve_description: "{{ cve_description | default(package_info.cve_description | default(''), true) }}"
-          cvss_score: "{{ cvss_score | default(package_info.cvss_score | default(''), true) }}"
+          # Never re-export extra_var "unknown"; prefer TPA-resolved package_info.
+          cve_id: "{{ _export_cve }}"
+          cve_title: "{{ package_info.cve_title | default(cve_title | default(''), true) }}"
+          cve_description: "{{ package_info.cve_description | default(cve_description | default(''), true) }}"
+          cvss_score: "{{ package_info.cvss_score | default(cvss_score | default(''), true) }}"
         per_host: false
+      vars:
+        _export_cve_matches: >-
+          {{
+            [
+              package_info.cve_id | default(''),
+              resolved_cve_id | default(''),
+              cve_id | default('')
+            ] | select('match', '^CVE-[0-9]') | list
+          }}
+        _export_cve: "{{ (_export_cve_matches | first) if (_export_cve_matches | length > 0) else 'CVE-' }}"

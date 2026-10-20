@@ -5,12 +5,23 @@
     _app_path: "{{ ao_app.gitlab_path | default('unknown') }}"
     _app_slug: "{{ (ao_app.gitlab_path | default('unknown')).split('/')[-1] }}"
     _approval: "{{ ao_app.approval | default('needs_approval') }}"
-    # Prefer top-level cve_id (promoted by query-tpa); fall back to package_info.
-    _cve: "{{ cve_id | default(package_info.cve_id | default('CVE-'), true) }}"
+    # cve_id extra_var ("unknown") shadows set_fact — prefer package_info.
+    _cve_matches: >-
+      {{
+        [
+          package_info.cve_id | default(''),
+          resolved_cve_id | default(''),
+          cve_id | default('')
+        ] | select('match', '^CVE-[0-9]') | list
+      }}
     _pkg: "{{ package_purl | default(artifact_name | default('n/a')) }}"
     _vuln: "{{ vulnerable_version | default('n/a') }}"
     _fix: "{{ fix_version | default(artifact_version | default('n/a')) }}"
     _sev: "{{ severity | default('medium') }}"
+
+- name: Pick resolved CVE for child title
+  ansible.builtin.set_fact:
+    _cve: "{{ (_cve_matches | first) if (_cve_matches | length > 0) else 'CVE-' }}"
 
 - name: Build child short description
   ansible.builtin.set_fact:

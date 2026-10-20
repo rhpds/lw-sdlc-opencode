@@ -24,7 +24,8 @@
           package_purl: "{{ package_purl | default(((artifact_group ~ ':' ~ artifact_name) if (artifact_group | default('') | length > 0 and artifact_name | default('') | length > 0) else (artifact_name | default(''))), true) }}"
           vulnerable_version: "{{ vulnerable_version | default('') }}"
           fix_version: "{{ fix_version | default(artifact_version | default('')) }}"
-          cve_id: "{{ cve_id | default('CVE-') }}"
+          # Nexus component events have no CVE; never forward the literal "unknown".
+          cve_id: "{{ cve_id if ((cve_id | default('')) is match('^CVE-[0-9]')) else 'CVE-' }}"
           severity: "{{ severity | default('medium') }}"
           tpa_url: "{{ tpa_url | default('') }}"
           keycloak_url: "{{ keycloak_url | default('') }}"
