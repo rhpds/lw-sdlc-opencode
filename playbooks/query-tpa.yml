@@ -31,11 +31,12 @@
       ansible.builtin.set_fact:
         base_purl: "{{ ('pkg:maven/' ~ maven_group ~ '/' ~ maven_artifact) if (maven_group | length > 0 and maven_artifact | length > 0) else '' }}"
 
-    # A plain Nexus component event carries no CVE, so cve_id arrives as
-    # "unknown" and the MR body would have nothing to show. publish-remediation.sh
-    # uploads an OSV advisory per CVE with aliases/severity/details, so look the
-    # advisory up by coordinate and use it to fill the MR Summary. Best effort:
-    # the bump must still happen when TPA has no advisory for this package.
+    # A plain Nexus component event carries no CVE, so cve_id arrives as the
+    # placeholder "CVE-" and the MR body would have nothing to show.
+    # publish-remediation.sh uploads an OSV advisory per CVE with
+    # aliases/severity/details, so look the advisory up by coordinate and use
+    # it to fill the MR Summary. Best effort: the bump must still happen when
+    # TPA has no advisory for this package.
     - name: Query TPA vulnerabilities for this artifact
       ansible.builtin.uri:
         # Query by artifact name: TPA indexes CVEs against the artifact, so the
@@ -53,10 +54,12 @@
     - name: Default advisory facts
       ansible.builtin.set_fact:
         tpa_vuln_items: []
-        resolved_cve_id: "{{ cve_id | default('unknown') }}"
+        # Placeholder until a real CVE-YYYY-NNNN is resolved (never "unknown").
+        resolved_cve_id: "{{ cve_id | default('CVE-') }}"
         resolved_cve_title: ""
         resolved_cve_description: ""
         resolved_cvss_score: ""
+        _cve_unresolved: ["", "unknown", "CVE-"]
 
     - name: Set vulnerability items from API response
       ansible.builtin.set_fact:
@@ -67,11 +70,11 @@
     # knows about for this coordinate.
     - name: Select the advisory to describe
       vars:
-        _cves: "{{ tpa_vuln_items | selectattr('identifier', 'defined') | selectattr('identifier', 'match', '^CVE-') | list }}"
-        _named: "{{ tpa_vuln_items | selectattr('identifier', 'defined') | selectattr('identifier', 'equalto', cve_id | default('')) | list }}"
+        _cves: "{{ tpa_vuln_items | selectattr('identifier', 'defined') | selectattr('identifier', 'match', '^CVE-[0-9]') | list }}"
+        _named: "{{ tpa_vuln_items | selectattr('identifier', 'defined') | selectattr('identifier', 'equalto', cve_id | default('')) | selectattr('identifier', 'match', '^CVE-[0-9]') | list }}"
         _pick: "{{ (_named | first) if (_named | length > 0) else ((_cves | first) if (_cves | length > 0) else {}) }}"
       ansible.builtin.set_fact:
-        resolved_cve_id: "{{ _pick.identifier | default(cve_id | default('unknown'), true) }}"
+        resolved_cve_id: "{{ _pick.identifier | default('CVE-') }}"
         resolved_cve_title: "{{ _pick.title | default('') }}"
         resolved_cve_description: "{{ _pick.description | default('') }}"
         resolved_cvss_score: >-
@@ -104,7 +107,7 @@
       register: tpa_adv_query
       when:
         - tpa_access_token is defined
-        - resolved_cve_id | default('unknown') in ['', 'unknown']
+        - resolved_cve_id | default('CVE-') in _cve_unresolved
       ignore_errors: true
 
     - name: Take the CVE named by that advisory
@@ -114,7 +117,7 @@
           {{ _adv | map(attribute='vulnerabilities') | select('defined') | flatten
              | selectattr('identifier', 'defined')
              | map(attribute='identifier')
-             | select('match', '^CVE-') | list }}
+             | select('match', '^CVE-[0-9]') | list }}
       ansible.builtin.set_fact:
         resolved_cve_id: "{{ _ids | first }}"
       when:
@@ -132,7 +135,9 @@
         validate_certs: "{{ validate_certs | default(false) }}"
         status_code: [200, 401, 404]
       register: tpa_cve_detail
-      when: resolved_cve_id | default('unknown') not in ['', 'unknown'] and (resolved_cve_title | default('')) == ''
+      when: >-
+        resolved_cve_id | default('CVE-') not in _cve_unresolved
+        and (resolved_cve_title | default('')) == ''
       ignore_errors: true
 
     - name: Fill title, description and score from the CVE record
@@ -160,6 +165,10 @@
         - tpa_cve_detail is succeeded
         - (tpa_cve_detail.status | default(0)) == 200
 
+    - name: Normalize unresolved CVE placeholder
+      ansible.builtin.set_fact:
+        resolved_cve_id: "{{ resolved_cve_id if ((resolved_cve_id | default('')) is match('^CVE-[0-9]')) else 'CVE-' }}"
+
     - name: Build package_info
       ansible.builtin.set_fact:
         package_info:
@@ -172,6 +181,15 @@
           cve_title: "{{ resolved_cve_title }}"
           cve_description: "{{ resolved_cve_description }}"
           cvss_score: "{{ resolved_cvss_score }}"
+
+    # Prepare suppresses set_stats; SNOW children and AO still need top-level
+    # cve_id (they do not read package_info.cve_id).
+    - name: Promote resolved CVE to top-level facts for SNOW / AO
+      ansible.builtin.set_fact:
+        cve_id: "{{ resolved_cve_id }}"
+        cve_title: "{{ resolved_cve_title | default('') }}"
+        cve_description: "{{ resolved_cve_description | default('') }}"
+        cvss_score: "{{ resolved_cvss_score | default('') }}"
 
     - name: Stage blast-radius helper input
       ansible.builtin.copy:
@@ -251,6 +269,10 @@
           affected_repos: "{{ affected_repos }}"
           blast_radius: "{{ blast_radius }}"
           query: "{{ package_purl | default(resolved_artifact_id, true) }}"
+          cve_id: "{{ cve_id }}"
+          cve_title: "{{ cve_title | default('') }}"
+          cve_description: "{{ cve_description | default('') }}"
+          cvss_score: "{{ cvss_score | default('') }}"
         per_host: false
       when: not (sdlc_suppress_set_stats | default(false) | bool)
 
@@ -259,7 +281,7 @@
     - name: Fail when blast radius is empty (AO does not launch Impact)
       ansible.builtin.fail:
         msg: >-
-          No blast radius for {{ resolved_artifact_id | default('unknown') }}
+          No blast radius for {{ resolved_artifact_id | default('n/a') }}
           (base_purl={{ blast_radius.base_purl | default(base_purl) | default('') }};
           checked apps={{ acme_app_names | join(',') }}).
           Skipping remediation.

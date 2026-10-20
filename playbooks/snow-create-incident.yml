@@ -27,7 +27,8 @@
               )
           }}
         _sev: "{{ severity | default('medium') }}"
-        _cve: "{{ cve_id | default('unknown') }}"
+        # Placeholder until Query TPA resolves a real CVE-YYYY-NNNN (then parent is PATCHed).
+        _cve: "{{ cve_id | default('CVE-') }}"
         _vuln: "{{ vulnerable_version | default('n/a') }}"
         _fix: "{{ fix_version | default(artifact_version | default('n/a')) }}"
 

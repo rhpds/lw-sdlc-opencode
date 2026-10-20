@@ -20,6 +20,56 @@
 
 - ansible.builtin.import_playbook: query-tpa.yml
 
+# Parent was created before Query TPA (placeholder [CVE-]). Refresh the title
+# now that cve_id / package_info are enriched.
+- name: Refresh parent INC with resolved CVE
+  hosts: localhost
+  gather_facts: false
+  vars:
+    snow_base: "{{ snow_svc_url | default(snow_url | default(''), true) }}"
+  tasks:
+    - name: Require parent for CVE refresh
+      ansible.builtin.assert:
+        that:
+          - (snow_base | default('') | length) > 0
+          - (parent_incident | default(snow_incident | default('')) | length) > 0
+        fail_msg: "parent_incident and snow_base required to refresh CVE on parent"
+
+    - name: Build refreshed parent short description
+      ansible.builtin.set_fact:
+        _parent_num: "{{ parent_incident | default(snow_incident) }}"
+        _pkg_coord: >-
+          {{
+            (
+              (artifact_group | default('') | length) > 0
+              and (artifact_name | default('') | length) > 0
+            )
+            | ternary(
+                (artifact_group | default('')) ~ ':' ~ (artifact_name | default('')),
+                (package_purl | default(artifact_name | default('n/a')))
+              )
+          }}
+        _sev: "{{ severity | default('medium') }}"
+        _cve: "{{ cve_id | default(package_info.cve_id | default('CVE-'), true) }}"
+        _vuln: "{{ vulnerable_version | default('n/a') }}"
+        _fix: "{{ fix_version | default(artifact_version | default('n/a')) }}"
+
+    - name: Format parent short description
+      ansible.builtin.set_fact:
+        _parent_short: >-
+          [{{ _cve }}] {{ _sev | upper }} — remediate {{ _pkg_coord }}
+          ({{ _vuln }} → {{ _fix }})
+
+    - name: PATCH parent short_description with resolved CVE
+      ansible.builtin.uri:
+        url: "{{ snow_base | regex_replace('/$', '') }}/api/v1/incidents/{{ _parent_num }}"
+        method: PATCH
+        body_format: json
+        body:
+          short_description: "{{ _parent_short | truncate(160, true, '') }}"
+        status_code: [200]
+        validate_certs: "{{ validate_certs | default(false) }}"
+
 - ansible.builtin.import_playbook: classify-affected-apps.yml
 
 - name: Post classify summary on parent incident
@@ -68,4 +118,8 @@
           blast_radius: "{{ blast_radius | default({}) }}"
           renovate_skips: "{{ renovate_skips | default([]) }}"
           policy_failures: "{{ policy_failures | default([]) }}"
+          cve_id: "{{ cve_id | default(package_info.cve_id | default('CVE-'), true) }}"
+          cve_title: "{{ cve_title | default(package_info.cve_title | default(''), true) }}"
+          cve_description: "{{ cve_description | default(package_info.cve_description | default(''), true) }}"
+          cvss_score: "{{ cvss_score | default(package_info.cvss_score | default(''), true) }}"
         per_host: false

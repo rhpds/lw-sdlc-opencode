@@ -5,7 +5,8 @@
     _app_path: "{{ ao_app.gitlab_path | default('unknown') }}"
     _app_slug: "{{ (ao_app.gitlab_path | default('unknown')).split('/')[-1] }}"
     _approval: "{{ ao_app.approval | default('needs_approval') }}"
-    _cve: "{{ cve_id | default('unknown') }}"
+    # Prefer top-level cve_id (promoted by query-tpa); fall back to package_info.
+    _cve: "{{ cve_id | default(package_info.cve_id | default('CVE-'), true) }}"
     _pkg: "{{ package_purl | default(artifact_name | default('n/a')) }}"
     _vuln: "{{ vulnerable_version | default('n/a') }}"
     _fix: "{{ fix_version | default(artifact_version | default('n/a')) }}"
