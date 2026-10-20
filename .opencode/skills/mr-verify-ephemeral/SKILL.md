@@ -5,7 +5,7 @@ description: Parse MR handoff, run isolated verify Job, deploy ephemeral environ
 
 # MR verify ephemeral
 
-Automates **Agent 2** behavior (`spec.md` §5). GitLab reads/notes via **`python3 /app/scripts/gitlab_api.py`** — see `.opencode/reference/gitlab-mcp.md`.
+Automates **Agent 2** behavior (`spec.md` §5). GitLab reads/notes via **`python3 /app/scripts/gitlab_api.py`** — see `.opencode/reference/gitlab-mcp.md`. The `license` and `regression` rows of the validation table are measured by **`python3 /app/scripts/lw_checks.py`** (step 5), not judged.
 
 ## Inputs
 
@@ -48,6 +48,12 @@ Prefer handoff JSON over webhook fields when both exist; they must agree on `mer
 **Forbidden:** Running `mvn clean verify`, `gradle test`, or `npm test` inside the OpenCode control-plane container.
 
 Demo depth **A** (`lw-demo-help-app`): use **`mvn clean verify`** unless handoff specifies otherwise.
+
+The Job runs the build **twice** — once on the MR branch, once with the target
+branch's `pom.xml` restored. The second run is the baseline the `regression`
+check in step 5 compares against; without it that check has nothing to measure
+and the agent is left inventing a behavioural diff. Budget roughly double the
+build time.
 
 1. **Idempotency — always delete before apply.** A Job spec is immutable, so
    `oc apply` over an existing Job prints `job.batch/verify-mr-<iid> unchanged`
@@ -136,6 +142,7 @@ Demo depth **A** (`lw-demo-help-app`): use **`mvn clean verify`** unless handoff
    - **Writable `HOME`.** The Job runs under the `restricted-v2` SCC as an arbitrary UID, so `/` and the image's default `$HOME` are read-only. Without both `HOME` and `-Dmaven.repo.local` pointed at the emptyDir, Maven fails immediately with `Could not create local repository at /.m2/repository`.
    - **`-s /settings/settings.xml`.** Without it Maven never reaches the tenant Nexus and cannot resolve the remediated artifact (step 3).
    - **`backoffLimit: 0`.** Retries multiply the log output the MR note has to summarize without changing the outcome.
+   - **`BASE_BRANCH`, and the `===LW-…===` markers around each build.** Step 5 locates the two runs in the log by those markers; drop them and the `regression` check has nothing to parse. The baseline `git fetch` works because the init container cloned with the PAT in the remote URL — the build container needs no credentials of its own.
 
    ```yaml
    apiVersion: batch/v1
@@ -187,11 +194,30 @@ Demo depth **A** (`lw-demo-help-app`): use **`mvn clean verify`** unless handoff
              workingDir: /workspace/src
              command: ["/bin/sh", "-c"]
              args:
-               - mvn -B clean verify -s /settings/settings.xml
-                 -Dmaven.repo.local=/workspace/.m2/repository
+               - |
+                 set -u
+                 M="mvn -B clean verify -s /settings/settings.xml -Dmaven.repo.local=/workspace/.m2/repository"
+                 echo "===LW-HEAD==="
+                 $M; rc=$?
+                 # Baseline: the same test code against the pre-bump pom.xml.
+                 # Only pom.xml is restored, so any difference in outcomes is
+                 # attributable to the dependency version and nothing else.
+                 echo "===LW-BASE==="
+                 if git fetch --depth 1 origin "$BASE_BRANCH" \
+                    && git checkout FETCH_HEAD -- pom.xml; then
+                   $M || true
+                 else
+                   echo "baseline checkout failed"
+                 fi
+                 echo "===LW-END==="
+                 # Exit on the HEAD build only. A red baseline is information,
+                 # not a reason to call this MR broken.
+                 exit $rc
              env:
                - name: HOME
                  value: /workspace
+               - name: BASE_BRANCH
+                 value: "<target_branch>"
              volumeMounts:
                - name: workspace
                  mountPath: /workspace
@@ -205,13 +231,19 @@ Demo depth **A** (`lw-demo-help-app`): use **`mvn clean verify`** unless handoff
 5. **Wait for either terminal condition.** `oc wait --for=condition=complete` never returns on a Job that failed — it blocks for the whole timeout, so the verifier reports "blocked" when it should report "failed". Poll for both:
 
    ```bash
-   for _ in $(seq 1 90); do
+   for _ in $(seq 1 150); do
      s="$(oc get job verify-mr-<merge_request_iid> -n "$SDLC_SANDBOX_NAMESPACE" -o jsonpath='{.status.conditions[?(@.type=="Complete")].status} {.status.conditions[?(@.type=="Failed")].status}')"
      case "$s" in "True"*) echo COMPLETE; break ;; *"True") echo FAILED; break ;; esac
      sleep 10
    done
-   oc logs job/verify-mr-<merge_request_iid> -n "$SDLC_SANDBOX_NAMESPACE" --all-containers --tail=200
+   oc logs job/verify-mr-<merge_request_iid> -n "$SDLC_SANDBOX_NAMESPACE" \
+     --all-containers > /tmp/opencode/verify-mr-<merge_request_iid>.log
+   tail -200 /tmp/opencode/verify-mr-<merge_request_iid>.log
    ```
+
+   Save the whole log to the file — do not use `--tail` for the saved copy.
+   Step 5 reads the baseline build out of it, and that section is near the
+   middle of a two-build log, not the end.
 
 6. Non-zero exit → **still do step 5 first**, then post the MR note with a log
    excerpt via `mr-note`, then **stop** (no ephemeral deploy).
@@ -331,45 +363,106 @@ verify Job and smoke tests actually produced.
 
 ### Which checks this skill can actually establish
 
-`mvn clean verify` (step 2) plus the smoke test (step 4) produce evidence for
-**three** keys and no others. Unless you ran something extra and can quote its
-output, this is the complete list of keys you are entitled to send:
+Five keys. Three you read out of the Job log; two you **measure with
+`lw_checks.py`**, which exists because reasoning about them from a green build
+is guessing:
 
 | Key | Evidence you must be able to quote |
 |-----|------------------------------------|
 | `unit_tests` | the Surefire `Tests run: N, Failures: …, Errors: …, Skipped: …` summary line |
 | `integration_tests` | the Failsafe `Tests run: …` summary line |
 | `dependency_compat` | `BUILD SUCCESS`, or the resolution error that replaced it |
+| `regression` | the JSON printed by `lw_checks.py regression` |
+| `license` | the JSON printed by `lw_checks.py license` |
 
-`signature`, `sbom_integrity`, `regression` and `license` are **not measured by
-this skill**. Nothing in `mvn clean verify` checksums the artifact against
-Nexus, diffs behaviour, or compares licence metadata. Omit those four keys.
-They stay Pending, a human sees that nobody checked them, and that is the
-correct outcome. Sending them because a green table looks finished is the one
-failure this step exists to prevent.
+`signature` and `sbom_integrity` remain unmeasured — nothing here checksums the
+artifact against Nexus or validates the SBOM. **Omit those two keys.** They stay
+Pending, a human sees that nobody checked them, and that is the correct outcome.
+Sending a key because a green table looks finished is the one failure this step
+exists to prevent.
 
-So a passing run sends exactly this shape — note the four absent keys:
+#### Measure `regression`
+
+The two-build verify Job ran the same test code against the pre-bump and
+post-bump `pom.xml`. Compare the two runs:
+
+```bash
+python3 /app/scripts/lw_checks.py regression --log /tmp/opencode/verify-mr-<iid>.log
+```
+
+#### Measure `license`
+
+You need the group, the artifact, and the version the MR is bumping **from**.
+The handoff JSON carries the artifact and the new version; read the old version
+out of the target branch's pom:
+
+```bash
+python3 /app/scripts/gitlab_api.py file-get --path <gitlab_path> \
+  --file-path pom.xml --ref <target_branch>
+```
+
+Then compare the licences the two versions resolve to:
+
+```bash
+python3 /app/scripts/lw_checks.py license \
+  --nexus-base "http://nexus.${NEXUS_NAMESPACE}.svc.cluster.local:8081" \
+  --group <group_id> --artifact <artifact_id> \
+  --old-version <old_version> --new-version <new_version> \
+  --repo "$NEXUS_REPOSITORIES"
+```
+
+`--nexus-base` takes the host and port **without** `/repository` — the script
+appends `/repository/<repo>/...` itself. `--repo` and `--proxy` both accept a
+comma-separated list and every POM fetch tries each in turn, so pass all the
+candidates rather than guessing which one holds the artifact.
+
+Two things the script handles that a manual reading would get wrong, and which
+are why you must not shortcut it:
+
+- **Most artifacts declare no licence of their own.** `commons-text` inherits
+  Apache-2.0 from a grandparent POM; reading only its own POM says "no licence
+  declared" for the dependency this whole lab is built around. The script walks
+  the `<parent>` chain the way Maven does.
+- **One licence has many spellings.** `Apache-2.0`, `Apache License, Version
+  2.0` and `apache2-something` are the same licence, and `MPL 2.0 or EPL 1.0`
+  is the same pair as two separate `<license>` elements. The script normalises
+  to SPDX ids before comparing, so it reports a change only when the licence
+  genuinely changed.
+
+Both commands print `{"status": ..., "details": ...}` — pass that object through
+to `mr-validation` as-is. Do not rewrite a `warning` into a `passed` because the
+build was green: a `warning` means the tool could not establish something, and
+saying so is the measurement.
+
+#### Send the results
+
+A passing run sends this shape — note the two absent keys:
 
 ```bash
 python3 /app/scripts/gitlab_api.py mr-validation --project-id <id> --iid <iid> --results '{
   "unit_tests":        {"status": "passed", "details": "<N>/<N> tests passed (0 failures, 0 errors, 0 skipped)"},
   "integration_tests": {"status": "passed", "details": "<N>/<N> tests passed (0 failures, 0 errors, 0 skipped)"},
-  "dependency_compat": {"status": "passed", "details": "Build succeeded against <artifact_id>:<new_version>"}
+  "dependency_compat": {"status": "passed", "details": "Build succeeded against <artifact_id>:<new_version>"},
+  "regression":        <paste the lw_checks.py regression object>,
+  "license":           <paste the lw_checks.py license object>
 }'
 ```
 
 Every `<N>` above is a placeholder. Copying a number out of this file instead of
-reading it out of the Job log is a fabrication even when the build did pass.
+reading it out of the Job log is a fabrication even when the build did pass. The
+same applies to the two `lw_checks.py` objects: paste what the command printed,
+not what this example suggests it might print.
 
 Rules, in order of importance:
 
 1. **Report only what you measured.** Before you send a key, name the line of
-   Job or smoke-test output it came from. If you cannot quote that line, or if
-   the justification is "inferred from the build passing", the check was not
-   measured: leave the key out. Inference is not measurement — a build that
-   compiles tells you nothing about licence metadata or behavioural regression.
-   A fabricated ✅ is the worst possible outcome here, because the whole point
-   of the table is that a human can trust it.
+   Job output, smoke-test output, or `lw_checks.py` JSON it came from. If you
+   cannot quote that line, or if the justification is "inferred from the build
+   passing", the check was not measured: leave the key out. Inference is not
+   measurement — a build that compiles tells you nothing about licence metadata
+   or behavioural regression, which is precisely why those two now have a tool
+   rather than a judgement call. A fabricated ✅ is the worst possible outcome
+   here, because the whole point of the table is that a human can trust it.
 2. `status` is one of `passed`, `failed`, `pending`, `skipped`, `warning`.
 3. On any failure use `"status": "failed"` with the real reason. The command
    rewrites **Recommended Action** to "Do not merge" by itself — do not also
@@ -397,7 +490,10 @@ Include: verify Job name and pass/fail, ephemeral namespace and Route URL, smoke
 | Job failed | step 5 with the failing key(s), then `mr-note` with logs; stop |
 | `oc apply` prints `job.batch/... unchanged` | You are about to read a previous run's Job. Delete it and re-apply (step 2.1); never poll a Job you did not create |
 | Deployment never becomes ready | A crash-looping pod is a result. Report the smoke test `failed` with `oc logs` output — do not delete and recreate the Deployment to retry |
-| Tempted to send `signature`, `sbom_integrity`, `regression` or `license` | This skill does not measure them. Omit the key |
+| Tempted to send `signature` or `sbom_integrity` | This skill does not measure them. Omit the key |
+| Tempted to write `regression` or `license` from judgement | Run `lw_checks.py`. If it returned a `warning`, send the warning — do not upgrade it because the build was green |
+| `lw_checks.py license` → `could not read the POM ... from any of` | A repo-name guess, not a bad MR. Check `NEXUS_REPOSITORIES` and pass every candidate to `--repo`/`--proxy` before reporting anything |
+| `lw_checks.py regression` → `no ===LW-HEAD=== section` | The Job ran the single-build command. Fix the Job args (step 2.4) and re-run; do not hand-write the key |
 | Job still running after the poll budget | `mr-note` reporting a timeout — never report a failed Job as "blocked" |
 | `Could not find artifact ... in central` | Build config bug, not a bad bump — check the `maven-settings` ConfigMap and `-s` flag before blaming the MR |
 | `Blocked mirror for repositories` | The `maven-default-http-blocker` override is missing from settings.xml |
