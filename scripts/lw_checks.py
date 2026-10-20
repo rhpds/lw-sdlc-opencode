@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Measure the two validation checks the agent cannot eyeball.
+"""Measure the validation checks the agent cannot eyeball.
 
 The agent fabricated `license` and `regression` because the skill described
-what a good answer looks like and gave it no way to obtain one. Reasoning
+what a good answer looks like and gave it no way to obtain one; `signature`
+and `sbom_integrity` were simply omitted for the same reason. Reasoning
 about a licence string or "behavioural diff" from a green build is guessing;
 these subcommands compute both from artefacts that actually exist, and print
 a result object ready to paste into `gitlab_api.py mr-validation`.
@@ -11,6 +12,8 @@ a result object ready to paste into `gitlab_api.py mr-validation`.
                           --old-version V --new-version V [--repo R] [--proxy R]
   lw_checks.py regression --log JOB_LOG            # two-build verify Job
   lw_checks.py regression --base-dir D --head-dir D  # when reports are on disk
+  lw_checks.py signature  --nexus-base URL --group G --artifact A --version V
+  lw_checks.py sbom       --log JOB_LOG --group G --artifact A --version V
 
 Both always print one JSON object on stdout and exit 0, even when the answer
 is unwelcome. A `warning` that says what is unknown is a measurement; a
@@ -20,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import hashlib
 import json
 import os
 import re
@@ -147,8 +151,20 @@ def fetch(url: str, timeout: int = 60) -> str | None:
         return None
 
 
+def fetch_bytes(url: str, timeout: int = 120) -> bytes | None:
+    try:
+        with urllib.request.urlopen(url, context=_CTX, timeout=timeout) as f:
+            return f.read()
+    except Exception:  # noqa: BLE001 — any failure means "not available here"
+        return None
+
+
 def gav_path(group: str, artifact: str, version: str) -> str:
     return f"{group.replace('.', '/')}/{artifact}/{version}/{artifact}-{version}.pom"
+
+
+def jar_path(group: str, artifact: str, version: str) -> str:
+    return f"{group.replace('.', '/')}/{artifact}/{version}/{artifact}-{version}.jar"
 
 
 def parent_gav(xml_text: str) -> tuple[str, str, str] | None:
@@ -265,6 +281,123 @@ def cmd_license(a: argparse.Namespace) -> dict:
     return {"status": "warning",
             "details": f"licence changed: {a.old_version} was {', '.join(sorted(old_ids))}, "
                        f"{a.new_version} is {shown}{note}"}
+
+
+# --------------------------------------------------------------------------
+# signature
+#
+# Despite the row name this is an *integrity* check, matching what the Tekton
+# route reports: the published JAR is hashed and compared against the digest
+# the artifact manager recorded beside it. The lab mirror publishes no
+# detached GPG signature, so saying "signature verified" would overstate it —
+# the details string says checksum, and names the algorithm used.
+# --------------------------------------------------------------------------
+_DIGESTS = [("sha512", hashlib.sha512), ("sha256", hashlib.sha256),
+            ("sha1", hashlib.sha1), ("md5", hashlib.md5)]
+
+
+def cmd_signature(a: argparse.Namespace) -> dict:
+    base = a.nexus_base.rstrip("/")
+    repos = [r.strip() for r in a.repo.split(",") if r.strip()] + \
+            [r.strip() for r in a.proxy.split(",") if r.strip()]
+    rel = jar_path(a.group, a.artifact, a.version)
+
+    jar = found_repo = None
+    for repo in repos:
+        jar = fetch_bytes(f"{base}/repository/{repo}/{rel}")
+        if jar:
+            found_repo = repo
+            break
+    if not jar:
+        return {"status": "failed",
+                "details": f"could not download {a.artifact}-{a.version}.jar from any of: "
+                           f"{', '.join(repos)}"}
+
+    for algo, fn in _DIGESTS:
+        raw = fetch(f"{base}/repository/{found_repo}/{rel}.{algo}")
+        if raw is None:
+            continue
+        # Nexus serves the bare hex digest; some mirrors append the filename.
+        published = raw.strip().split()[0].lower() if raw.strip() else ""
+        actual = fn(jar).hexdigest()
+        if not published:
+            continue
+        if published == actual:
+            return {"status": "passed",
+                    "details": f"{algo} checksum of the published JAR matches the one recorded "
+                               f"by the artifact manager ({actual[:16]}…); no detached GPG "
+                               f"signature is published, so this is an integrity check"}
+        return {"status": "failed",
+                "details": f"{algo} mismatch for {a.artifact}-{a.version}.jar: artifact manager "
+                           f"recorded {published[:16]}…, the published JAR hashes to "
+                           f"{actual[:16]}…"}
+
+    return {"status": "warning",
+            "details": f"{a.artifact}-{a.version}.jar downloaded ({len(jar)} bytes) but the "
+                       f"artifact manager published no checksum beside it, so integrity "
+                       "could not be confirmed"}
+
+
+# --------------------------------------------------------------------------
+# sbom_integrity
+#
+# The verify Job already builds the CycloneDX SBOM, so the assertion is that
+# the SBOM it produced actually lists the coordinate the MR claims to bump.
+# As with regression the Job pod is gone by reporting time, so the purls are
+# read back out of the Job log rather than the workspace.
+# --------------------------------------------------------------------------
+PURL = re.compile(r"pkg:maven/[^\s\"']+")
+
+
+def sbom_purls(text: str) -> list[str] | None:
+    """Maven purls from the ===LW-SBOM=== section of a Job log."""
+    out, inside, seen_marker = [], False, False
+    for line in text.splitlines():
+        if "===LW-SBOM===" in line:
+            inside, seen_marker = True, True
+            continue
+        if inside and line.startswith("===LW-"):
+            inside = False
+            continue
+        if inside:
+            out.extend(PURL.findall(line))
+    return out if seen_marker else None
+
+
+def cmd_sbom(a: argparse.Namespace) -> dict:
+    try:
+        with open(a.log, encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError as e:
+        return {"status": "failed", "details": f"could not read the Job log: {e}"}
+
+    purls = sbom_purls(text)
+    if purls is None:
+        return {"status": "failed",
+                "details": "the Job log has no ===LW-SBOM=== section — the verify Job did not "
+                           "emit the generated SBOM"}
+    if not purls:
+        return {"status": "failed",
+                "details": "the build produced no CycloneDX SBOM, or it listed no Maven "
+                           "components"}
+
+    want = f"pkg:maven/{a.group}/{a.artifact}@{a.version}"
+    if any(p.split("?")[0] == want for p in purls):
+        return {"status": "passed",
+                "details": f"the CycloneDX SBOM generated by this build lists "
+                           f"{a.group}:{a.artifact}:{a.version} among its {len(set(purls))} "
+                           "components"}
+
+    # Present at another version: the bump did not take effect in the build.
+    stem = f"pkg:maven/{a.group}/{a.artifact}@"
+    others = sorted({p.split("?")[0][len(stem):] for p in purls if p.startswith(stem)})
+    if others:
+        return {"status": "failed",
+                "details": f"the SBOM lists {a.artifact} at {', '.join(others)}, not "
+                           f"{a.version} — the build did not resolve the bumped version"}
+    return {"status": "failed",
+            "details": f"{a.group}:{a.artifact} does not appear in the SBOM at all "
+                       f"({len(set(purls))} components listed)"}
 
 
 # --------------------------------------------------------------------------
@@ -462,6 +595,26 @@ def main() -> int:
     lic.add_argument("--proxy", default="maven-public,maven-central",
                      help="proxy/group repo(s) holding the upstream baseline and parent POMs")
     lic.set_defaults(fn=cmd_license)
+
+    sig = sub.add_parser("signature",
+                         help="compare the published JAR against the recorded checksum")
+    sig.add_argument("--nexus-base", required=True, help="https://nexus-<ns>.<domain>")
+    sig.add_argument("--group", required=True)
+    sig.add_argument("--artifact", required=True)
+    sig.add_argument("--version", required=True, help="the remediated .rhlw version")
+    sig.add_argument("--repo", default="lightwell-remediated",
+                     help="hosted repo(s) holding the .rhlw build, comma-separated")
+    sig.add_argument("--proxy", default="maven-public,maven-central",
+                     help="fallback repo(s), comma-separated")
+    sig.set_defaults(fn=cmd_signature)
+
+    sb = sub.add_parser("sbom", help="assert the generated SBOM lists the bumped coordinate")
+    sb.add_argument("--log", required=True,
+                    help="verify Job log containing a ===LW-SBOM=== section")
+    sb.add_argument("--group", required=True)
+    sb.add_argument("--artifact", required=True)
+    sb.add_argument("--version", required=True)
+    sb.set_defaults(fn=cmd_sbom)
 
     reg = sub.add_parser("regression", help="diff test outcomes between base and change")
     src = reg.add_mutually_exclusive_group(required=True)

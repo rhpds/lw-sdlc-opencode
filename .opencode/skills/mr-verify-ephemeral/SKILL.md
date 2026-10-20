@@ -5,7 +5,7 @@ description: Parse MR handoff, run isolated verify Job, deploy ephemeral environ
 
 # MR verify ephemeral
 
-Automates **Agent 2** behavior (`spec.md` §5). GitLab reads/notes via **`python3 /app/scripts/gitlab_api.py`** — see `.opencode/reference/gitlab-mcp.md`. The `license` and `regression` rows of the validation table are measured by **`python3 /app/scripts/lw_checks.py`** (step 5), not judged.
+Automates **Agent 2** behavior (`spec.md` §5). GitLab reads/notes via **`python3 /app/scripts/gitlab_api.py`** — see `.opencode/reference/gitlab-mcp.md`. The `license`, `regression`, `signature` and `sbom_integrity` rows of the validation table are measured by **`python3 /app/scripts/lw_checks.py`** (step 5), not judged.
 
 ## Inputs
 
@@ -199,6 +199,11 @@ build time.
                  M="mvn -B clean verify -s /settings/settings.xml -Dmaven.repo.local=/workspace/.m2/repository"
                  echo "===LW-HEAD==="
                  $M; rc=$?
+                 # The CycloneDX SBOM this build produced. Emit it now: the
+                 # baseline run below starts with `clean` and deletes target/,
+                 # and the pod is gone before anyone can read the workspace.
+                 echo "===LW-SBOM==="
+                 grep -o 'pkg:maven/[^"]*' target/bom.json 2>/dev/null | sort -u
                  # Baseline: the same test code against the pre-bump pom.xml.
                  # Only pom.xml is restored, so any difference in outcomes is
                  # attributable to the dependency version and nothing else.
@@ -363,7 +368,7 @@ verify Job and smoke tests actually produced.
 
 ### Which checks this skill can actually establish
 
-Five keys. Three you read out of the Job log; two you **measure with
+Seven keys. Three you read out of the Job log; four you **measure with
 `lw_checks.py`**, which exists because reasoning about them from a green build
 is guessing:
 
@@ -374,12 +379,13 @@ is guessing:
 | `dependency_compat` | `BUILD SUCCESS`, or the resolution error that replaced it |
 | `regression` | the JSON printed by `lw_checks.py regression` |
 | `license` | the JSON printed by `lw_checks.py license` |
+| `signature` | the JSON printed by `lw_checks.py signature` |
+| `sbom_integrity` | the JSON printed by `lw_checks.py sbom` |
 
-`signature` and `sbom_integrity` remain unmeasured — nothing here checksums the
-artifact against Nexus or validates the SBOM. **Omit those two keys.** They stay
-Pending, a human sees that nobody checked them, and that is the correct outcome.
-Sending a key because a green table looks finished is the one failure this step
-exists to prevent.
+There is no longer any key this skill cannot establish. That does **not** make
+it acceptable to fill a row you did not run the tool for: sending a key because
+a green table looks finished is the one failure this step exists to prevent.
+If a tool failed to run, omit its key and say so in the step 6 note.
 
 #### Measure `regression`
 
@@ -429,14 +435,40 @@ are why you must not shortcut it:
   to SPDX ids before comparing, so it reports a change only when the licence
   genuinely changed.
 
-Both commands print `{"status": ..., "details": ...}` — pass that object through
+#### Measure `signature` and `sbom_integrity`
+
+Both need the same coordinate as the licence check.
+
+```bash
+python3 /app/scripts/lw_checks.py signature \
+  --nexus-base "http://nexus.${NEXUS_NAMESPACE}.svc.cluster.local:8081" \
+  --group <group_id> --artifact <artifact_id> --version <new_version> \
+  --repo "$NEXUS_REPOSITORIES"
+
+python3 /app/scripts/lw_checks.py sbom --log /tmp/opencode/verify-mr-<iid>.log \
+  --group <group_id> --artifact <artifact_id> --version <new_version>
+```
+
+`signature` downloads the published JAR and compares it against the checksum
+the artifact manager recorded beside it, preferring the strongest digest
+available. Despite the row name this is an **integrity** check — the lab mirror
+publishes no detached GPG signature — and the tool's own wording says so. Do
+not reword it into "signature verified".
+
+`sbom` asserts that the CycloneDX SBOM this build produced lists the bumped
+coordinate, reading the purls out of the `===LW-SBOM===` section of the Job
+log. A `failed` here usually means the build resolved the *old* version, which
+is a genuine finding about the MR and not a tooling problem — the details
+string will name the version it actually found.
+
+All four commands print `{"status": ..., "details": ...}` — pass that object through
 to `mr-validation` as-is. Do not rewrite a `warning` into a `passed` because the
 build was green: a `warning` means the tool could not establish something, and
 saying so is the measurement.
 
 #### Send the results
 
-A passing run sends this shape — note the two absent keys:
+A passing run sends all seven keys:
 
 ```bash
 python3 /app/scripts/gitlab_api.py mr-validation --project-id <id> --iid <iid> --results '{
@@ -444,13 +476,19 @@ python3 /app/scripts/gitlab_api.py mr-validation --project-id <id> --iid <iid> -
   "integration_tests": {"status": "passed", "details": "<N>/<N> tests passed (0 failures, 0 errors, 0 skipped)"},
   "dependency_compat": {"status": "passed", "details": "Build succeeded against <artifact_id>:<new_version>"},
   "regression":        <paste the lw_checks.py regression object>,
-  "license":           <paste the lw_checks.py license object>
+  "license":           <paste the lw_checks.py license object>,
+  "signature":         <paste the lw_checks.py signature object>,
+  "sbom_integrity":    <paste the lw_checks.py sbom object>
 }'
 ```
 
+Sending all seven matters beyond completeness: **any key you omit renders as
+`Pending` and erases whatever was in that row before**, so a partial run can
+silently wipe results another route already measured.
+
 Every `<N>` above is a placeholder. Copying a number out of this file instead of
 reading it out of the Job log is a fabrication even when the build did pass. The
-same applies to the two `lw_checks.py` objects: paste what the command printed,
+same applies to the four `lw_checks.py` objects: paste what the command printed,
 not what this example suggests it might print.
 
 Rules, in order of importance:
@@ -490,8 +528,9 @@ Include: verify Job name and pass/fail, ephemeral namespace and Route URL, smoke
 | Job failed | step 5 with the failing key(s), then `mr-note` with logs; stop |
 | `oc apply` prints `job.batch/... unchanged` | You are about to read a previous run's Job. Delete it and re-apply (step 2.1); never poll a Job you did not create |
 | Deployment never becomes ready | A crash-looping pod is a result. Report the smoke test `failed` with `oc logs` output — do not delete and recreate the Deployment to retry |
-| Tempted to send `signature` or `sbom_integrity` | This skill does not measure them. Omit the key |
-| Tempted to write `regression` or `license` from judgement | Run `lw_checks.py`. If it returned a `warning`, send the warning — do not upgrade it because the build was green |
+| Tempted to write any of `regression`, `license`, `signature`, `sbom_integrity` from judgement | Run `lw_checks.py`. If it returned a `warning`, send the warning — do not upgrade it because the build was green |
+| `lw_checks.py sbom` → `lists <artifact> at <old version>` | A real finding about the MR: the build resolved the pre-bump version. Report it `failed`; do not re-run hoping for a different answer |
+| `lw_checks.py signature` → `warning: published no checksum` | The artifact manager recorded no digest. Send the warning — "downloaded fine" is not integrity |
 | `lw_checks.py license` → `could not read the POM ... from any of` | A repo-name guess, not a bad MR. Check `NEXUS_REPOSITORIES` and pass every candidate to `--repo`/`--proxy` before reporting anything |
 | `lw_checks.py regression` → `no ===LW-HEAD=== section` | The Job ran the single-build command. Fix the Job args (step 2.4) and re-run; do not hand-write the key |
 | Job still running after the poll budget | `mr-note` reporting a timeout — never report a failed Job as "blocked" |

@@ -245,6 +245,100 @@ with tempfile.TemporaryDirectory() as tmp:
     check("log: missing file -> failed",
           lw.regression_from_log(os.path.join(tmp, "nope.log"))["status"], "failed")
 
+
+# -- signature (checksum integrity) ----------------------------------------
+# Not a GPG check: the lab mirror publishes no detached signature, so the
+# wording must say checksum. A missing digest is a warning, not a pass --
+# "nothing contradicted it" is not the same as "it matched".
+import hashlib  # noqa: E402
+
+JAR = b"PK\x03\x04 pretend this is a jar"
+BLOBS = {
+    "com/h2database/h2/2.2.220/h2-2.2.220.jar": JAR,
+    "com/h2database/h2/2.2.220/h2-2.2.220.jar.sha1": hashlib.sha1(JAR).hexdigest().encode(),
+    "com/bad/x/1.0/x-1.0.jar": JAR,
+    "com/bad/x/1.0/x-1.0.jar.sha1": (b"0" * 40),
+    "com/nodigest/y/1.0/y-1.0.jar": JAR,
+}
+
+
+def stub_bytes(url, timeout=120):
+    for path, body in BLOBS.items():
+        if url.endswith(path):
+            return body
+    return None
+
+
+def stub_text(url, timeout=60):
+    b = stub_bytes(url)
+    if b is not None:
+        return b.decode()
+    return stub_fetch(url, timeout)
+
+
+lw.fetch_bytes = stub_bytes
+lw.fetch = stub_text
+
+
+def sig(group, artifact, version):
+    return lw.cmd_signature(NS(nexus_base="https://n", group=group, artifact=artifact,
+                               version=version, repo="lightwell-remediated",
+                               proxy="maven-public"))
+
+
+r = sig("com.h2database", "h2", "2.2.220")
+check("signature: digest matches", r["status"], "passed")
+assert "sha1" in r["details"] and "integrity check" in r["details"], r["details"]
+assert "GPG" in r["details"], "must not imply a cryptographic signature: " + r["details"]
+
+r = sig("com.bad", "x", "1.0")
+check("signature: digest mismatch -> failed", r["status"], "failed")
+
+r = sig("com.nodigest", "y", "1.0")
+check("signature: no published digest -> warning", r["status"], "warning")
+
+check("signature: jar missing -> failed", sig("no.such", "thing", "9")["status"], "failed")
+
+lw.fetch = stub_fetch  # restore the POM stub for anything later
+
+
+# -- sbom_integrity --------------------------------------------------------
+def sbomlog(purls, marker=True):
+    body = "\n".join(purls)
+    return (f"===LW-SBOM===\n{body}\n===LW-END===\n" if marker else "no sbom section here\n")
+
+
+with tempfile.TemporaryDirectory() as tmp:
+    def sb(text, version="1.9.rhlw-00005"):
+        p = os.path.join(tmp, "job.log")
+        pathlib.Path(p).write_text(text)
+        return lw.cmd_sbom(NS(log=p, group="org.apache.commons",
+                              artifact="commons-text", version=version))
+
+    good = ["pkg:maven/org.apache.commons/commons-text@1.9.rhlw-00005",
+            "pkg:maven/com.google.guava/guava@32.1.0"]
+    r = sb(sbomlog(good))
+    check("sbom: coordinate present", r["status"], "passed")
+    assert "2 components" in r["details"], r["details"]
+
+    # purls often carry ?type=jar — it must not defeat the match
+    r = sb(sbomlog(["pkg:maven/org.apache.commons/commons-text@1.9.rhlw-00005?type=jar"]))
+    check("sbom: qualifier ignored", r["status"], "passed")
+
+    r = sb(sbomlog(["pkg:maven/org.apache.commons/commons-text@1.9"]))
+    check("sbom: old version still listed -> failed", r["status"], "failed")
+    assert "not 1.9.rhlw-00005" in r["details"], r["details"]
+
+    r = sb(sbomlog(["pkg:maven/com.google.guava/guava@32.1.0"]))
+    check("sbom: artifact absent -> failed", r["status"], "failed")
+    assert "does not appear" in r["details"], r["details"]
+
+    check("sbom: no marker -> failed", sb(sbomlog([], marker=False))["status"], "failed")
+    check("sbom: empty section -> failed", sb(sbomlog([]))["status"], "failed")
+    check("sbom: missing file -> failed",
+          lw.cmd_sbom(NS(log=os.path.join(tmp, "nope.log"), group="g",
+                         artifact="a", version="1"))["status"], "failed")
+
 if failures:
     print(f"FAIL ({len(failures)})")
     for f in failures:
