@@ -6,3 +6,7 @@
 # Ignore local OpenCode state only:
 .opencode/cache/
 .opencode/data/
+
+# Byte-compiled test/helper output; scripts/ is COPYed into the image.
+__pycache__/
+*.pyc
