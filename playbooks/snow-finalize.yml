@@ -1,11 +1,15 @@
 ---
-# After Deploy Healthy: resolve the parent INC. The brief "Deploy finished"
-# status + child link was already posted by snow-lifecycle-event (deployed).
-# Do not dump Argo/Route details here — those stay on the child.
+# After Deploy Healthy: resolve the parent INC and its child INCs. The brief
+# "Deploy finished" status + child link was already posted by
+# snow-lifecycle-event (deployed). Do not dump Argo/Route details here —
+# those stay on the child comments.
 #
 # Soft-skip when this gitlab_path has no child/parent (bridge Deploy fan-out
 # for AO apps that were not in this remediation). Never fail the JT for that —
 # otherwise AO Deploy shows completed_with_errors on every promote.
+#
+# Closing the parent also closes every child (explicit PATCH here; snow-mock
+# cascades on parent → Resolved/Closed as a safety net for UI/API closes).
 - name: Finalize ServiceNow parent incident after remediation run
   hosts: localhost
   gather_facts: false
@@ -100,6 +104,32 @@
       register: snow_parent_get
       when: (_has_parent | bool)
 
+    - name: Collect child incidents to close
+      ansible.builtin.set_fact:
+        _child_incidents: "{{ snow_parent_get.json.result.child_incidents | default([]) }}"
+      when: (_has_parent | bool)
+
+    - name: PATCH each child to the same final state
+      ansible.builtin.uri:
+        url: "{{ snow_base | regex_replace('/$', '') }}/api/v1/incidents/{{ item }}"
+        method: PATCH
+        body_format: json
+        body:
+          state: "{{ _snow_final_state }}"
+          resolution_code: "{{ snow_resolution_code | default('Solved (Permanently)') }}"
+          resolution_notes: >-
+            Closed with parent {{ _parent }} after Deploy Healthy for
+            {{ gitlab_path | default('app') }} (guid={{ guid | default('') }}).
+          resolved_by: "{{ snow_created_by | default('Lightwell AO') }}"
+        status_code: [200]
+        validate_certs: "{{ validate_certs | default(false) }}"
+      loop: "{{ _child_incidents | default([]) }}"
+      when:
+        - (_has_parent | bool)
+        - (close_parent | default(true) | bool)
+        - (close_children | default(true) | bool)
+        - (_child_incidents | default([]) | length) > 0
+
     - name: PATCH parent state
       ansible.builtin.uri:
         url: "{{ snow_base | regex_replace('/$', '') }}/api/v1/incidents/{{ _parent }}"
@@ -124,7 +154,7 @@
           parent_incident: "{{ _parent }}"
           snow_incident: "{{ _parent }}"
           finalize_skipped: "false"
-          child_incidents: "{{ snow_parent_get.json.result.child_incidents | default([]) }}"
+          child_incidents: "{{ _child_incidents | default([]) }}"
           snow_final_state: "{{ _snow_final_state if (close_parent | default(true) | bool) else 'open' }}"
         per_host: false
       when: (_has_parent | bool)
