@@ -1,12 +1,14 @@
 ---
 # After GitLab MR merge: poll PaC commit status until the push build is terminal.
 # PaC mirrors PipelineRun success/failure onto the merge commit (source=external
-# pipeline + commit status "Pipelines as Code CI / build-push-to-main").
+# pipeline + commit status, e.g. "Pipelines as Code CI / wire-transfer-svc-build").
 # Used by AO Merged+Build canvas so we do not need a second Build webhook.
 #
 # Requires: gitlab_url, gitlab_token|gitlab_pat, gitlab_path
 # Optional: merge_request_iid, merge_commit_sha, project_id,
+#           wait_for_status_context (Jinja regex; "" disables name filter),
 #           build_poll_retries (90), build_poll_delay (10)
+# Default context matches legacy build-push-to-main and {app}-build names.
 # Exports: status (Succeeded|Failed|Cancelled|TimedOut), pipelinerun-ish fields
 - name: Poll PaC / push build status via GitLab
   hosts: localhost
@@ -20,6 +22,13 @@
           - (gitlab_token | default(gitlab_pat | default('')) | length) > 0
           - (gitlab_path | default('') | length) > 0
         fail_msg: "gitlab_url, gitlab_token, and gitlab_path are required"
+
+    - name: Resolve status-name filter (legacy + {app}-build)
+      ansible.builtin.set_fact:
+        # Jinja `search` is a regex. Match old PaC name and renamed PipelineRuns
+        # (wire-transfer-svc-build, benefits-mgmt-app-build, …).
+        # Omit `| default(..., true)` so "" still disables the name filter.
+        _status_context: "{{ wait_for_status_context | default('build-push-to-main|-build') }}"
 
     - name: Resolve GitLab project id
       ansible.builtin.uri:
@@ -104,7 +113,10 @@
         (
           (_statuses.json | default([]))
           | selectattr('name', 'defined')
-          | selectattr('name', 'search', 'build-push-to-main')
+          | selectattr(
+              'name', 'search',
+              _status_context if (_status_context | length) > 0 else '.'
+            )
           | selectattr('status', 'defined')
           | selectattr('status', 'in', ['success', 'failed', 'canceled'])
           | list
@@ -120,7 +132,10 @@
           {{
             (_statuses.json | default([]))
             | selectattr('name', 'defined')
-            | selectattr('name', 'search', 'build-push-to-main')
+            | selectattr(
+                'name', 'search',
+                _status_context if (_status_context | length) > 0 else '.'
+              )
             | list
           }}
         _any_terminal: >-
