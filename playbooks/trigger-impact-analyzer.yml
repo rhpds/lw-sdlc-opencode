@@ -147,7 +147,10 @@
             - (opencode_session_id | default('') | length) > 0
             - not (impact_failed | default(false) | bool)
 
-        - name: Widen already-current when agent reports missing dep / no MR
+        # Prefer detect-impact-outcome (assistant text only). Do NOT search
+        # _impact_messages.content / skill JSON here — that false-positived on
+        # f6rc7 after a real MR (!3) and skipped the scoped poll.
+        - name: Widen already-current when assistant summary reports no MR
           ansible.builtin.set_fact:
             impact_already_current: true
             iteration_outcome: already_current
@@ -156,9 +159,9 @@
             - not (impact_already_current | default(false) | bool)
             - >-
               (
-                (opencode_session_summary | default(''))
+                (_impact_assistant_text | default(''))
                 ~ ' '
-                ~ (_impact_messages.content | default(''))
+                ~ (opencode_session_summary | default(''))
               )
               | lower
               is search(
