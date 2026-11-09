@@ -20,6 +20,21 @@
               else []
             )
           }}
+        # Defaults so set_stats always has non-empty / typed values (ADR-063).
+        iteration_outcome: skipped_no_target
+        remediation_needed: false
+        draft_mr: false
+        merge_request_iid: 0
+        project_id: 0
+        source_branch: ""
+        target_branch: "{{ gitlab_default_branch | default('main') }}"
+        merge_request_url: ""
+        repository_git_url: ""
+        mr_poll_found: false
+        impact_already_current: false
+        opencode_sync_ok: false
+        impact_failed: false
+        impact_fail_reason: ""
 
     - name: Skip OpenCode when no target app
       ansible.builtin.debug:
@@ -47,6 +62,15 @@
             )
           }}
         app_approval: "{{ _iter_repos[0].approval | default('needs_approval') }}"
+        repository_git_url: >-
+          {{
+            _iter_repos[0].repo_url
+            if (_iter_repos[0].repo_url | default('') | regex_search('\\.git$'))
+            else (
+              (gitlab_url | default(_iter_repos[0].repo_url | default('')) | regex_replace('/$', ''))
+              ~ '/' ~ _iter_repos[0].gitlab_path ~ '.git'
+            )
+          }}
       when: (_iter_repos | length) >= 1
 
     # Risk classification travels in .lightwell/policy.json, which classify
@@ -84,98 +108,208 @@
           risk_rationale: "{{ (_app_policy | default({})).get('riskRationale', '') }}"
       when: (_iter_repos | length) >= 1
 
-    - name: Start OpenCode impact-analyzer (async)
-      ansible.builtin.import_tasks: tasks/opencode-prompt-async.yml
+    - name: Run impact-analyzer and collect AO artifacts
       when: (_iter_repos | length) >= 1
+      block:
+        - name: Start OpenCode impact-analyzer (async)
+          ansible.builtin.import_tasks: tasks/opencode-prompt-async.yml
 
-    # Docs: GET /session/status — idle sessions are omitted from the map.
-    # Do NOT poll GET /session/:id (no status field) or /session/:id/status (SPA HTML).
-    - name: Wait for OpenCode session to go idle
-      ansible.builtin.import_tasks: tasks/opencode-wait-idle.yml
-      when: (_iter_repos | length) >= 1 and (opencode_session_id | default('') | length) > 0
+        # Docs: GET /session/status — idle sessions are omitted from the map.
+        - name: Wait for OpenCode session to go idle
+          ansible.builtin.import_tasks: tasks/opencode-wait-idle.yml
+          when: (opencode_session_id | default('') | length) > 0
 
-    - name: Capture OpenCode session summary + UI deep link
-      ansible.builtin.import_tasks: tasks/opencode-session-summary.yml
-      when: (_iter_repos | length) >= 1 and (opencode_session_id | default('') | length) > 0
+        - name: Mark Impact failed when session never went idle
+          ansible.builtin.set_fact:
+            impact_failed: true
+            impact_fail_reason: >-
+              OpenCode session {{ opencode_session_id | default('n/a') }}
+              did not become idle (status={{ opencode_sync_status | default('unknown') }},
+              saw_busy={{ opencode_saw_busy | default(false) }}).
+              Headless Impact must not hang on question/task prompts (ADR-063).
+            iteration_outcome: failed
+            remediation_needed: false
+            draft_mr: false
+            merge_request_iid: 0
+          when:
+            - (opencode_session_id | default('') | length) > 0
+            - not (opencode_sync_ok | default(false) | bool)
 
-    - name: Detect already-current vs needs MR
-      ansible.builtin.import_tasks: tasks/detect-impact-outcome.yml
-      when: (_iter_repos | length) >= 1 and (opencode_session_id | default('') | length) > 0
+        - name: Capture OpenCode session summary + UI deep link
+          ansible.builtin.import_tasks: tasks/opencode-session-summary.yml
+          when:
+            - (opencode_session_id | default('') | length) > 0
+            - not (impact_failed | default(false) | bool)
 
-    - name: Poll GitLab until draft remediation MR exists
-      ansible.builtin.import_tasks: tasks/poll-gitlab-mr.yml
-      when:
-        - (_iter_repos | length) >= 1
-        - not (impact_already_current | default(false) | bool)
+        - name: Detect already-current vs needs MR
+          ansible.builtin.import_tasks: tasks/detect-impact-outcome.yml
+          when:
+            - (opencode_session_id | default('') | length) > 0
+            - not (impact_failed | default(false) | bool)
 
-    - name: Mark iteration as MR opened
-      ansible.builtin.set_fact:
-        iteration_outcome: mr_opened
-        remediation_needed: true
-      when:
-        - (_iter_repos | length) >= 1
-        - not (impact_already_current | default(false) | bool)
+        - name: Widen already-current when agent reports missing dep / no MR
+          ansible.builtin.set_fact:
+            impact_already_current: true
+            iteration_outcome: already_current
+          when:
+            - not (impact_failed | default(false) | bool)
+            - not (impact_already_current | default(false) | bool)
+            - >-
+              (
+                (opencode_session_summary | default(''))
+                ~ ' '
+                ~ (_impact_messages.content | default(''))
+              )
+              | lower
+              is search(
+                'not found in pom|dependency .* not found|no merge request will be created|no merge request was created'
+              )
 
-    - name: Defaults when already current (no MR)
-      ansible.builtin.set_fact:
-        iteration_outcome: already_current
-        remediation_needed: false
-        draft_mr: false
-        merge_request_iid: 0
-        project_id: "{{ project_id | default(0) }}"
-        source_branch: ""
-        target_branch: "{{ gitlab_default_branch | default('main') }}"
-        merge_request_url: ""
-        repository_git_url: "{{ opencode_repo_url | default('') }}"
-      when:
-        - (_iter_repos | length) >= 1
-        - impact_already_current | default(false) | bool
+        - name: Poll GitLab until draft remediation MR exists
+          ansible.builtin.import_tasks: tasks/poll-gitlab-mr.yml
+          when:
+            - not (impact_failed | default(false) | bool)
+            - not (impact_already_current | default(false) | bool)
 
-    - name: Resolve GitLab project id when already current
-      ansible.builtin.uri:
-        url: "{{ gitlab_url | regex_replace('/$', '') }}/api/v4/projects/{{ opencode_gitlab_path | regex_replace('/', '%2F') }}"
-        method: GET
-        headers:
-          PRIVATE-TOKEN: "{{ gitlab_token | default(gitlab_pat | default('')) }}"
-        status_code: [200]
-        validate_certs: "{{ validate_certs | default(false) }}"
-      register: _already_project
-      no_log: true
-      when:
-        - (_iter_repos | length) >= 1
-        - impact_already_current | default(false) | bool
+        - name: Mark iteration as MR opened
+          ansible.builtin.set_fact:
+            iteration_outcome: mr_opened
+            remediation_needed: true
+            draft_mr: true
+          when:
+            - not (impact_failed | default(false) | bool)
+            - not (impact_already_current | default(false) | bool)
+            - mr_poll_found | default(false) | bool
 
-    - name: Set project id for already-current path
-      ansible.builtin.set_fact:
-        project_id: "{{ _already_project.json.id | int }}"
-      when:
-        - (_iter_repos | length) >= 1
-        - impact_already_current | default(false) | bool
-        - _already_project is defined
-        - (_already_project.status | default(0) | int) == 200
+        - name: Mark Impact failed when no MR appeared
+          ansible.builtin.set_fact:
+            impact_failed: true
+            impact_fail_reason: >-
+              Impact agent finished without opening MR
+              {{ mr_expected_source_branch | default('update-artifact-*') }}
+              on {{ opencode_gitlab_path | default('') }}.
+              Session={{ opencode_session_id | default('n/a') }}.
+            iteration_outcome: failed
+            remediation_needed: false
+            draft_mr: false
+            merge_request_iid: 0
+          when:
+            - not (impact_failed | default(false) | bool)
+            - not (impact_already_current | default(false) | bool)
+            - not (mr_poll_found | default(false) | bool)
 
-    # AAP omits empty-string set_stats keys; AO then fails property lookup on
-    # ${impact.artifacts.opencode_session_summary}. Always export non-empty.
-    - name: Export impact artifacts for AO loop
+        - name: Defaults when already current (no MR)
+          ansible.builtin.set_fact:
+            iteration_outcome: already_current
+            remediation_needed: false
+            draft_mr: false
+            merge_request_iid: 0
+            source_branch: ""
+            target_branch: "{{ gitlab_default_branch | default('main') }}"
+            merge_request_url: ""
+            repository_git_url: "{{ opencode_repo_url | default(repository_git_url | default('')) }}"
+          when:
+            - not (impact_failed | default(false) | bool)
+            - impact_already_current | default(false) | bool
+
+        - name: Resolve GitLab project id when already current
+          ansible.builtin.uri:
+            url: "{{ gitlab_url | regex_replace('/$', '') }}/api/v4/projects/{{ opencode_gitlab_path | regex_replace('/', '%2F') }}"
+            method: GET
+            headers:
+              PRIVATE-TOKEN: "{{ gitlab_token | default(gitlab_pat | default('')) }}"
+            status_code: [200]
+            validate_certs: "{{ validate_certs | default(false) }}"
+          register: _already_project
+          no_log: true
+          when:
+            - not (impact_failed | default(false) | bool)
+            - impact_already_current | default(false) | bool
+
+        - name: Set project id for already-current path
+          ansible.builtin.set_fact:
+            project_id: "{{ _already_project.json.id | int }}"
+          when:
+            - not (impact_failed | default(false) | bool)
+            - impact_already_current | default(false) | bool
+            - _already_project is defined
+            - (_already_project.status | default(0) | int) == 200
+
+      rescue:
+        - name: Capture unexpected Impact failure
+          ansible.builtin.set_fact:
+            impact_failed: true
+            impact_fail_reason: >-
+              Impact playbook error:
+              {{ ansible_failed_result.msg | default(ansible_failed_result | to_json) }}
+            iteration_outcome: failed
+            remediation_needed: false
+            draft_mr: false
+            merge_request_iid: "{{ merge_request_iid | default(0) | int }}"
+
+      always:
+        # AAP omits empty-string set_stats keys; AO then fails property lookup
+        # on ${impact.artifacts.*}. Always export non-empty / typed values
+        # BEFORE any final fail (ADR-062 / ADR-063).
+        - name: Export impact artifacts for AO loop
+          ansible.builtin.set_stats:
+            data:
+              gitlab_path: "{{ opencode_gitlab_path | default('n/a', true) }}"
+              approval: "{{ app_approval | default('needs_approval') }}"
+              opencode_session_id: "{{ opencode_session_id | default('n/a', true) }}"
+              opencode_session_title: "{{ opencode_session_title | default('n/a', true) }}"
+              opencode_session_summary: "{{ opencode_session_summary | default('n/a', true) }}"
+              opencode_session_ui_url: "{{ opencode_session_ui_url | default('n/a', true) }}"
+              opencode_ui_url: "{{ opencode_ui_url | default('n/a', true) }}"
+              draft_mr: "{{ draft_mr | default(false) }}"
+              remediation_needed: "{{ remediation_needed | default(false) }}"
+              iteration_outcome: "{{ iteration_outcome | default('failed') }}"
+              snow_incident: "{{ snow_incident | default('n/a', true) }}"
+              package_info: "{{ package_info | default({}) }}"
+              merge_request_iid: "{{ merge_request_iid | default(0) | int }}"
+              project_id: "{{ project_id | default(0) | int }}"
+              source_branch: "{{ source_branch | default('n/a', true) }}"
+              target_branch: "{{ target_branch | default('main') }}"
+              repository_git_url: "{{ repository_git_url | default(opencode_repo_url | default('n/a', true)) }}"
+              merge_request_url: "{{ merge_request_url | default('n/a', true) }}"
+              impact_fail_reason: "{{ impact_fail_reason | default('n/a', true) }}"
+            per_host: false
+
+    - name: Export skip artifacts when no target app
       ansible.builtin.set_stats:
         data:
-          gitlab_path: "{{ opencode_gitlab_path | default('') }}"
-          approval: "{{ app_approval | default('needs_approval') }}"
-          opencode_session_id: "{{ opencode_session_id | default('n/a', true) }}"
-          opencode_session_title: "{{ opencode_session_title | default('n/a', true) }}"
-          opencode_session_summary: "{{ opencode_session_summary | default('n/a', true) }}"
-          opencode_session_ui_url: "{{ opencode_session_ui_url | default('n/a', true) }}"
+          gitlab_path: "n/a"
+          approval: "n/a"
+          opencode_session_id: "n/a"
+          opencode_session_title: "n/a"
+          opencode_session_summary: "n/a"
+          opencode_session_ui_url: "n/a"
           opencode_ui_url: "{{ opencode_ui_url | default('n/a', true) }}"
-          draft_mr: "{{ false if (impact_already_current | default(false) | bool) else true }}"
-          remediation_needed: "{{ not (impact_already_current | default(false) | bool) }}"
-          iteration_outcome: "{{ iteration_outcome | default('mr_opened') }}"
-          snow_incident: "{{ snow_incident | default('') }}"
+          draft_mr: false
+          remediation_needed: false
+          iteration_outcome: skipped_no_target
+          snow_incident: "{{ snow_incident | default('n/a', true) }}"
           package_info: "{{ package_info | default({}) }}"
-          merge_request_iid: "{{ merge_request_iid | default(0) | int }}"
-          project_id: "{{ project_id | default(0) | int }}"
-          source_branch: "{{ source_branch | default('') }}"
-          target_branch: "{{ target_branch | default('main') }}"
-          repository_git_url: "{{ repository_git_url | default(opencode_repo_url | default('')) }}"
-          merge_request_url: "{{ merge_request_url | default('') }}"
+          merge_request_iid: 0
+          project_id: 0
+          source_branch: "n/a"
+          target_branch: "{{ gitlab_default_branch | default('main') }}"
+          repository_git_url: "n/a"
+          merge_request_url: "n/a"
+          impact_fail_reason: "n/a"
         per_host: false
-      when: (_iter_repos | length) >= 1
+      when: (_iter_repos | length) < 1
+
+    # Do NOT ansible.fail here. AO with continue_on_failure still receives
+    # empty artifacts from a failed AAP job (f6rc7: impact_already crashed on
+    # missing iteration_outcome). Export iteration_outcome=failed via set_stats
+    # and let the Start canvas soft-skip Verifier (ADR-063).
+    - name: Report Impact failure outcome for AO soft-skip
+      ansible.builtin.debug:
+        msg: >-
+          IMPACT_FAILED outcome={{ iteration_outcome }}
+          reason={{ impact_fail_reason | default('n/a') }}
+          session={{ opencode_session_id | default('n/a') }}
+      when:
+        - (_iter_repos | length) >= 1
+        - impact_failed | default(false) | bool

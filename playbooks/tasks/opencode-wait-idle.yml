@@ -2,18 +2,47 @@
 # Wait until OpenCode reports the session idle via the documented status API:
 #   GET /session/status  →  { [sessionID]: SessionStatus }
 # SessionStatus is {type: "idle"|"busy"|"retry", ...}. Idle sessions are
-# omitted from the map (see opencode SessionStatus.list) — treat missing as idle.
-# Docs: https://opencode.ai/docs/server/
+# omitted from the map (see opencode SessionStatus.list).
+#
+# ADR-063: two-phase wait —
+#   1) observe busy/retry (so we do not treat "not registered yet" as idle)
+#   2) wait until omitted/idle
+# A still-busy session after retries sets opencode_sync_ok=false. The Impact
+# playbook must set_stats and fail — never abandon the agent for a 15-minute
+# GitLab MR poll.
 #
 # Requires: opencode_base_url, opencode_session_id, opencode_basic_auth_b64
-# Sets: opencode_sync_status, opencode_sync_ok
+# Sets: opencode_sync_status, opencode_sync_ok, opencode_saw_busy
 
-# Avoid a false idle if we poll before prompt_async registers as busy.
 - name: Settle so /session/status can register busy
   ansible.builtin.pause:
-    seconds: "{{ opencode_status_settle_seconds | default(2) | int }}"
+    seconds: "{{ opencode_status_settle_seconds | default(5) | int }}"
 
-- name: Poll GET /session/status until this session is idle
+- name: Phase 1 — wait until this session reports busy/retry
+  ansible.builtin.uri:
+    url: "{{ opencode_base_url }}/session/status"
+    method: GET
+    headers:
+      Authorization: "Basic {{ opencode_basic_auth_b64 }}"
+    status_code: [200]
+    validate_certs: "{{ validate_certs | default(false) }}"
+  register: oc_busy_poll
+  vars:
+    _busy_type: "{{ oc_busy_poll.json[opencode_session_id].type | default('') }}"
+  until: _busy_type in ['busy', 'retry']
+  retries: "{{ opencode_busy_retries | default(15) | int }}"
+  delay: "{{ opencode_sync_delay | default(2) | int }}"
+  failed_when: false
+
+- name: Record whether session registered as busy
+  ansible.builtin.set_fact:
+    opencode_saw_busy: >-
+      {{
+        (oc_busy_poll.json[opencode_session_id].type | default(''))
+        in ['busy', 'retry']
+      }}
+
+- name: Phase 2 — wait until session is idle (omitted or type=idle)
   ansible.builtin.uri:
     url: "{{ opencode_base_url }}/session/status"
     method: GET
@@ -23,21 +52,45 @@
     validate_certs: "{{ validate_certs | default(false) }}"
   register: oc_status_poll
   vars:
-    _oc_entry: "{{ oc_status_poll.json[opencode_session_id] | default({'type': 'idle'}) }}"
-  until: (_oc_entry.type | default('idle')) == 'idle'
+    _oc_entry: "{{ oc_status_poll.json[opencode_session_id] | default({}) }}"
+    _oc_type: "{{ _oc_entry.type | default('') }}"
+  until: (_oc_type | length) == 0 or _oc_type == 'idle'
   retries: "{{ opencode_sync_retries | default(90) | int }}"
   delay: "{{ opencode_sync_delay | default(2) | int }}"
   failed_when: false
+  when: opencode_saw_busy | bool
 
 - name: Capture final session status entry
   ansible.builtin.set_fact:
-    _oc_status_entry: "{{ oc_status_poll.json[opencode_session_id] | default({'type': 'idle'}) }}"
+    _oc_status_entry: >-
+      {{
+        (oc_status_poll.json[opencode_session_id] | default({}))
+        if (opencode_saw_busy | bool)
+        else (oc_busy_poll.json[opencode_session_id] | default({}))
+      }}
 
 - name: Derive sync status from /session/status
   ansible.builtin.set_fact:
-    opencode_sync_status: "{{ _oc_status_entry.type | default('idle') }}"
+    opencode_sync_status: >-
+      {{
+        _oc_status_entry.type
+        | default(
+          'idle' if (opencode_saw_busy | default(false) | bool) else 'never_busy'
+        )
+      }}
     opencode_sync_ok: >-
       {{
-        (oc_status_poll.status | default(0) | int) == 200
-        and (_oc_status_entry.type | default('idle')) == 'idle'
+        (opencode_saw_busy | default(false) | bool)
+        and (
+          (_oc_status_entry.type | default('')) == 'idle'
+          or (_oc_status_entry | length) == 0
+        )
       }}
+
+- name: Show OpenCode idle-wait result
+  ansible.builtin.debug:
+    msg: >-
+      opencode_sync_ok={{ opencode_sync_ok }}
+      status={{ opencode_sync_status }}
+      saw_busy={{ opencode_saw_busy | default(false) }}
+      session={{ opencode_session_id }}

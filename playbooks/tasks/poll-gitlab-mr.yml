@@ -1,8 +1,40 @@
 ---
 # After Impact OpenCode runs, poll GitLab until a draft remediation MR appears.
-# Requires: gitlab_url, gitlab_token|gitlab_pat, opencode_gitlab_path
-# Optional: mr_poll_retries (default 90), mr_poll_delay (default 10s)
-# Sets: merge_request_iid, project_id, source_branch, target_branch, repository_git_url
+# Requires: gitlab_url, gitlab_token|gitlab_pat, opencode_gitlab_path, package_info
+# Optional: mr_poll_retries (default 18), mr_poll_delay (default 5s)
+# Defaults shortened under ADR-063: agent is already idle before we poll, so
+# a long wait only delays the soft-fail / AO SNOW path when no MR appears.
+# Sets: merge_request_iid, project_id, source_branch, target_branch,
+#       repository_git_url, mr_poll_found, mr_expected_source_branch
+#
+# ADR-063: scope to update-artifact-<sanitized-new_version> when version is
+# known so concurrent Starts cannot bind the wrong MR. Poll never fatals —
+# mr_poll_found=false lets Impact set_stats then soft-fail for AO.
+
+- name: Resolve expected MR source branch
+  ansible.builtin.set_fact:
+    mr_expected_source_branch: >-
+      {{
+        (
+          'update-artifact-'
+          ~ (
+            (
+              package_info.new_version
+              | default(package_info.fix_version | default(''))
+            )
+            | regex_replace('[^A-Za-z0-9._-]+', '-')
+            | regex_replace('^-+|-+$', '')
+          )
+        )
+        if (
+          (
+            package_info.new_version
+            | default(package_info.fix_version | default(''))
+            | length
+          ) > 0
+        )
+        else ''
+      }}
 
 - name: Resolve GitLab project for MR poll
   ansible.builtin.uri:
@@ -26,7 +58,7 @@
         )
       }}
 
-- name: Poll GitLab for remediation MR (update-artifact-* branch)
+- name: Poll GitLab for remediation MR (scoped branch when known)
   ansible.builtin.uri:
     url: "{{ gitlab_url | regex_replace('/$', '') }}/api/v4/projects/{{ project_id }}/merge_requests?state=opened&order_by=updated_at&sort=desc&per_page=30"
     method: GET
@@ -37,37 +69,73 @@
   register: _mr_list
   until: >-
     (
-      (_mr_list.json | default([]))
-      | selectattr('source_branch', 'defined')
-      | map(attribute='source_branch')
-      | select('match', '^update-artifact-')
-      | list
-      | length
-    ) > 0
-  retries: "{{ mr_poll_retries | default(90) | int }}"
-  delay: "{{ mr_poll_delay | default(10) | int }}"
+      (
+        (_mr_list.json | default([]))
+        | selectattr('source_branch', 'defined')
+        | selectattr('source_branch', 'equalto', mr_expected_source_branch)
+        | list
+        | length
+      ) > 0
+      if (mr_expected_source_branch | default('') | length) > 0
+      else
+      (
+        (_mr_list.json | default([]))
+        | selectattr('source_branch', 'defined')
+        | map(attribute='source_branch')
+        | select('match', '^update-artifact-')
+        | list
+        | length
+      ) > 0
+    )
+  retries: "{{ mr_poll_retries | default(18) | int }}"
+  delay: "{{ mr_poll_delay | default(5) | int }}"
+  failed_when: false
   no_log: true
 
 - name: Pick newest matching MR
   ansible.builtin.set_fact:
     _matched_mrs: >-
       {{
-        (_mr_list.json | default([]))
-        | selectattr('source_branch', 'defined')
-        | selectattr('source_branch', 'match', '^update-artifact-')
-        | list
+        (
+          (_mr_list.json | default([]))
+          | selectattr('source_branch', 'defined')
+          | selectattr('source_branch', 'equalto', mr_expected_source_branch)
+          | list
+        )
+        if (mr_expected_source_branch | default('') | length) > 0
+        else
+        (
+          (_mr_list.json | default([]))
+          | selectattr('source_branch', 'defined')
+          | selectattr('source_branch', 'match', '^update-artifact-')
+          | list
+        )
       }}
 
-- name: Export MR coordinates
+- name: Export MR coordinates when found
   ansible.builtin.set_fact:
-    merge_request_iid: "{{ _matched_mrs[0].iid | int }}"
-    source_branch: "{{ _matched_mrs[0].source_branch }}"
-    target_branch: "{{ _matched_mrs[0].target_branch | default('main') }}"
-    merge_request_url: "{{ _matched_mrs[0].web_url | default('') }}"
-    mr_draft: "{{ _matched_mrs[0].draft | default(_matched_mrs[0].work_in_progress | default(true)) }}"
+    mr_poll_found: "{{ (_matched_mrs | length) > 0 }}"
+    merge_request_iid: "{{ (_matched_mrs[0].iid | int) if (_matched_mrs | length) > 0 else 0 }}"
+    source_branch: "{{ _matched_mrs[0].source_branch if (_matched_mrs | length) > 0 else (mr_expected_source_branch | default('')) }}"
+    target_branch: "{{ (_matched_mrs[0].target_branch | default('main')) if (_matched_mrs | length) > 0 else (gitlab_default_branch | default('main')) }}"
+    merge_request_url: "{{ (_matched_mrs[0].web_url | default('')) if (_matched_mrs | length) > 0 else '' }}"
+    mr_draft: >-
+      {{
+        (
+          _matched_mrs[0].draft
+          | default(_matched_mrs[0].work_in_progress | default(true))
+        )
+        if (_matched_mrs | length) > 0 else true
+      }}
 
-- name: Show found MR
+- name: Show MR poll result
   ansible.builtin.debug:
     msg: >-
+      mr_poll_found={{ mr_poll_found }}
+      expected_branch={{ mr_expected_source_branch | default('') }}
+      {% if mr_poll_found | bool %}
       Found MR !{{ merge_request_iid }} on {{ opencode_gitlab_path }}
       ({{ source_branch }} → {{ target_branch }}, draft={{ mr_draft }})
+      {% else %}
+      No matching open MR on {{ opencode_gitlab_path }}
+      {% endif %}

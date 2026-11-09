@@ -30,7 +30,7 @@
         )
         | lower
         is search(
-          'already current|already using|no update was needed|remediation not required|no merge request was created|version already current'
+          'already current|already using|no update was needed|remediation not required|no merge request was created|no merge request will be created|version already current|not found in pom|dependency .* not found'
         )
       }}
 
