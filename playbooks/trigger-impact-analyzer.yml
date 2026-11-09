@@ -162,7 +162,7 @@
               )
               | lower
               is search(
-                'not found in pom|dependency .* not found|no merge request will be created|no merge request was created'
+                'not found in pom|dependency [a-z0-9.:_-]+ not found|no merge request will be created|no merge request was created'
               )
 
         - name: Poll GitLab until draft remediation MR exists

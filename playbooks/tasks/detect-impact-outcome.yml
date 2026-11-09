@@ -1,7 +1,12 @@
 ---
 # After impact-analyzer is idle, decide whether an MR was opened or the app
 # is already on the fix version. Prefer OpenCode's own wording; fall back to
-# a default-branch pom check so we never burn 90× MR polls on a no-op.
+# a default-branch pom check so we never burn MR polls on a no-op.
+#
+# IMPORTANT: only search assistant *text* parts. Searching the raw session
+# JSON / skill tool output false-positives on phrases inside SKILL.md
+# (e.g. "dependency impact remediation" … "Project not found" matched
+# `dependency .* not found` on f6rc7).
 #
 # Requires: opencode_base_url, opencode_session_id, opencode_basic_auth_b64,
 #           gitlab_url, gitlab_token|gitlab_pat, opencode_gitlab_path, package_info
@@ -19,18 +24,36 @@
   register: _impact_messages
   failed_when: false
 
-- name: Detect already-current from agent text
+- name: Collect assistant text from session messages
+  ansible.builtin.set_fact:
+    _impact_assistant_text: >-
+      {{
+        (
+          _impact_messages.json
+          | default([])
+          | selectattr('info', 'defined')
+          | selectattr('info.role', 'defined')
+          | selectattr('info.role', 'equalto', 'assistant')
+          | map(attribute='parts')
+          | list
+          | flatten
+          | selectattr('type', 'defined')
+          | selectattr('type', 'equalto', 'text')
+          | map(attribute='text')
+          | list
+          | join(' ')
+        )
+        if (_impact_messages.json is sequence)
+        else (_impact_messages.content | default(''))
+      }}
+
+- name: Detect already-current from assistant text
   ansible.builtin.set_fact:
     _agent_says_current: >-
       {{
-        (
-          (_impact_messages.content | default(''))
-          ~ ' '
-          ~ (_impact_messages.json | default({}) | to_json)
-        )
-        | lower
+        (_impact_assistant_text | default('') | lower)
         is search(
-          'already current|already using|no update was needed|remediation not required|no merge request was created|no merge request will be created|version already current|not found in pom|dependency .* not found'
+          'already current|already using|no update was needed|remediation not required|no merge request was created|no merge request will be created|version already current|not found in pom|dependency [a-z0-9.:_-]+ not found'
         )
       }}
 
