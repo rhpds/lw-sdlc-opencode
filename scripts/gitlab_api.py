@@ -618,6 +618,31 @@ def cmd_mr_merge(args: argparse.Namespace) -> None:
     out(api_or_die("PUT", f"/projects/{pid}/merge_requests/{iid}/merge", body))
 
 
+
+def cmd_commit_status(args: argparse.Namespace) -> None:
+    """Report an external check on the MR head commit.
+
+    GitLab rolls external commit statuses on a SHA into a pipeline, which is
+    what `only_allow_merge_if_pipeline_succeeds` gates on. Posting `pending`
+    when the verifier starts and `success`/`failed` when it finishes is
+    therefore what extends that gate to cover this agent: without it the
+    Tekton pipeline can go green and release the merge while the agent is
+    still working, or has not started.
+    """
+    project = resolve_project(args.path, args.project_id)
+    pid = project["id"]
+    sha = args.sha
+    if not sha:
+        mr = api_or_die("GET", f"/projects/{pid}/merge_requests/{args.mr_iid}")
+        sha = mr.get("sha")
+        if not sha:
+            die(f"could not resolve the head sha of MR !{args.mr_iid}")
+    body = {"state": args.state, "name": args.name, "description": args.description or ""}
+    if args.target_url:
+        body["target_url"] = args.target_url
+    out(api_or_die("POST", f"/projects/{pid}/statuses/{sha}", body))
+
+
 def cmd_bump_maven_mr(args: argparse.Namespace) -> None:
     project = resolve_project(args.path, args.project_id)
     pid = int(project["id"])
@@ -795,6 +820,19 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--content", default=None)
     sp.add_argument("--content-file", default=None)
     sp.set_defaults(func=cmd_commit_file)
+
+    sp = sub.add_parser("commit-status",
+                        help="Post an external commit status on the MR head commit")
+    add_project_flags(sp)
+    sp.add_argument("--mr-iid", required=True)
+    sp.add_argument("--state", required=True,
+                    choices=["pending", "running", "success", "failed", "canceled"])
+    sp.add_argument("--name", default="lightwell/mr-verifier",
+                    help="context name shown on the commit status")
+    sp.add_argument("--description", default="")
+    sp.add_argument("--target-url", default="")
+    sp.add_argument("--sha", default="", help="defaults to the MR head sha")
+    sp.set_defaults(func=cmd_commit_status)
 
     sp = sub.add_parser("mr-create", help="Create a merge request")
     add_project_flags(sp)

@@ -21,6 +21,7 @@ Token auth is `PRIVATE-TOKEN` from `GITLAB_PAT` (or `GITLAB_TOKEN`). Official Gi
 | `mr-create --path … --source-branch … --title … --description …` | Open MR |
 | `mr-get --project-id N --mr-iid N` | Fetch MR (description / handoff) |
 | `mr-note --project-id N --mr-iid N --body "…"` | Post MR note |
+| `mr-validation --project-id N --iid N --results '{…}'` | Rewrite the Automated Validation table between the `lw:validation` markers. Note `--iid`, **not** `--mr-iid`. Any check key you omit is rendered Pending |
 | `bump-maven-mr --path … --artifact-id g:a --new-version V --impact-text "…"` | **Demo A one-shot**: bump `pom.xml`, branch, MR + handoff JSON |
 
 All successful commands print JSON on stdout (except `file-get` without `--json`).
