@@ -45,6 +45,9 @@ Environment: `GITLAB_URL`, `GITLAB_PAT` per `.opencode/reference/gitlab-credenti
 1. `GITLAB_PAT` is set (`echo` must not print empty). Do not invent tokens.
 2. Do not load skill `mr-verify-ephemeral`.
 3. If `blast_radius.count` is `0` or `affected_repos` is empty: **stop**—do not open an MR.
+4. **Headless / unattended.** Never call tool `question`, never ask the
+   operator to confirm an MR, never spawn a `task` / subagent. Run
+   `bump-maven-mr` yourself in this session.
 
 ## Step 1 — Resolve target repo
 
@@ -59,9 +62,13 @@ Environment: `GITLAB_URL`, `GITLAB_PAT` per `.opencode/reference/gitlab-credenti
 
 Write a short **Risk Assessment** paragraph: why this application is or is not
 affected, and whether human review is required and why. Keep it factual; you
-pass it as `--impact-text`.
+pass it as `--impact-text`. **Do not stop after this paragraph** — Step 3 is
+mandatory unless a Failure-handling row applies.
 
 ## Step 3 — Bump + MR (preferred one-shot)
+
+**Required.** Call this CLI in the same turn after Step 2. Do not ask for
+confirmation. Do not delegate to another agent.
 
 Run:
 
@@ -144,4 +151,8 @@ Blast radius: demo A (single app)
 
 ## Completion
 
-Return summary: GitLab project, MR URL, `merge_request_iid`, and confirmation that agent-handoff JSON is present.
+Return summary: GitLab project, MR URL, `merge_request_iid`, and confirmation
+that agent-handoff JSON is present. If you did not open an MR (or hit a
+Failure-handling stop), say so explicitly — including the words
+`no merge request was created` when the dependency is already current or
+missing from the pom — so the orchestrator can short-circuit.
