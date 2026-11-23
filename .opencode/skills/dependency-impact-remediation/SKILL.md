@@ -42,7 +42,10 @@ Environment: `GITLAB_URL`, `GITLAB_PAT` per `.opencode/reference/gitlab-credenti
 
 ## Preconditions
 
-1. `GITLAB_PAT` is set (`echo` must not print empty). Do not invent tokens.
+1. `GITLAB_PAT` is set: `test -n "$GITLAB_PAT"`. Do not validate the token
+   format — GitLab PAT formats vary across versions (dashes, underscores, and
+   varying lengths are all valid). If the variable is non-empty, proceed.
+   Do not invent tokens.
 2. Do not load skill `mr-verify-ephemeral`.
 3. If `blast_radius.count` is `0` or `affected_repos` is empty: **stop**—do not open an MR.
 4. **Headless / unattended.** Never call tool `question`, never ask the
