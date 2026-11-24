@@ -19,6 +19,25 @@
         "task": "deny"
       }
     },
+    "lightwell-remediation": {
+      "mode": "primary",
+      "description": "Adapt application source to a Lightwell rebuild. Never edit the dependency.",
+      "permission": {
+        "edit": {
+          "*": "deny",
+          "src/main/*": "allow",
+          "src/test/*": "allow",
+          "REMEDIATION.md": "allow"
+        },
+        "bash": {
+          "*": "deny",
+          "git diff*": "allow",
+          "git status*": "allow"
+        },
+        "question": "deny",
+        "task": "deny"
+      }
+    },
     "mr-verifier": {
       "mode": "primary",
       "description": "Isolated verify, ephemeral deploy, MR feedback",
